@@ -1,0 +1,3 @@
+C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/rascall-v4.dir
+C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/edit_cache.dir
+C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/rebuild_cache.dir

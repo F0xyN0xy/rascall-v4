@@ -1,0 +1,3 @@
+C:\msys64\mingw64\bin\cmake.exe -E rm -f CMakeFiles\rascall-v4.dir/objects.a
+C:\msys64\mingw64\bin\ar.exe qc CMakeFiles\rascall-v4.dir/objects.a @CMakeFiles\rascall-v4.dir\objects1.rsp
+C:\msys64\mingw64\bin\g++.exe -O3 -march=native -DNDEBUG -flto=auto -fno-fat-lto-objects -Wl,--whole-archive CMakeFiles\rascall-v4.dir/objects.a -Wl,--no-whole-archive -o rascall-v4.exe -Wl,--out-implib,librascall-v4.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\rascall-v4.dir\linkLibs.rsp
