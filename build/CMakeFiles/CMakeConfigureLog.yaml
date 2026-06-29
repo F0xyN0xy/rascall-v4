@@ -4048,3 +4048,67 @@ events:
         
       exitCode: 0
 ...
+
+---
+events:
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "C:/msys64/mingw64/share/cmake/Modules/CheckIPOSupported.cmake:197 (try_compile)"
+      - "C:/msys64/mingw64/share/cmake/Modules/CheckIPOSupported.cmake:320 (_ipo_run_language_check)"
+      - "CMakeLists.txt:40 (check_ipo_supported)"
+    directories:
+      source: "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/src"
+      binary: "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin"
+    buildResult:
+      variable: "_IPO_LANGUAGE_CHECK_RESULT"
+      cached: true
+      stdout: |
+        Change Dir: 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        
+        Run Build Command(s): C:/msys64/mingw64/bin/cmake.exe -E env VERBOSE=1 C:/msys64/mingw64/bin/mingw32-make.exe -f Makefile
+        C:\\msys64\\mingw64\\bin\\cmake.exe -SC:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src -BC:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin --check-build-system CMakeFiles\\Makefile.cmake 0
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_progress_start C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\\\CMakeFiles\\progress.marks
+        C:/msys64/mingw64/bin/mingw32-make.exe  -f CMakeFiles\\Makefile2 all
+        mingw32-make[1]: Entering directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:/msys64/mingw64/bin/mingw32-make.exe  -f CMakeFiles\\foo.dir\\build.make CMakeFiles/foo.dir/depend
+        mingw32-make[2]: Entering directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_depends "MinGW Makefiles" C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles\\foo.dir\\DependInfo.cmake foo
+        Dependee "C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles\\foo.dir\\DependInfo.cmake" is newer than depender "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/depend.internal".
+        Dependee "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir/depend.internal".
+        Scanning dependencies of target foo
+        mingw32-make[2]: Leaving directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:/msys64/mingw64/bin/mingw32-make.exe  -f CMakeFiles\\foo.dir\\build.make CMakeFiles/foo.dir/build
+        mingw32-make[2]: Entering directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [ 25%] Building CXX object CMakeFiles/foo.dir/foo.cpp.obj
+        C:\\msys64\\mingw64\\bin\\g++.exe   -flto=auto -fno-fat-lto-objects -o CMakeFiles\\foo.dir\\foo.cpp.obj -c C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src\\foo.cpp
+        [ 50%] Linking CXX static library libfoo.a
+        C:\\msys64\\mingw64\\bin\\cmake.exe -P CMakeFiles\\foo.dir\\cmake_clean_target.cmake
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_link_script CMakeFiles\\foo.dir\\link.txt --verbose=1
+        "C:/msys64/mingw64/bin/gcc-ar.exe" qc libfoo.a CMakeFiles/foo.dir/foo.cpp.obj
+        "C:/msys64/mingw64/bin/gcc-ranlib.exe" libfoo.a
+        mingw32-make[2]: Leaving directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [ 50%] Built target foo
+        C:/msys64/mingw64/bin/mingw32-make.exe  -f CMakeFiles\\boo.dir\\build.make CMakeFiles/boo.dir/depend
+        mingw32-make[2]: Entering directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_depends "MinGW Makefiles" C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles\\boo.dir\\DependInfo.cmake boo
+        Dependee "C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles\\boo.dir\\DependInfo.cmake" is newer than depender "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/depend.internal".
+        Dependee "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/CMakeDirectoryInformation.cmake" is newer than depender "C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir/depend.internal".
+        Scanning dependencies of target boo
+        mingw32-make[2]: Leaving directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:/msys64/mingw64/bin/mingw32-make.exe  -f CMakeFiles\\boo.dir\\build.make CMakeFiles/boo.dir/build
+        mingw32-make[2]: Entering directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [ 75%] Building CXX object CMakeFiles/boo.dir/main.cpp.obj
+        C:\\msys64\\mingw64\\bin\\g++.exe   -flto=auto -fno-fat-lto-objects -o CMakeFiles\\boo.dir\\main.cpp.obj -c C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\src\\main.cpp
+        [100%] Linking CXX executable boo.exe
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_link_script CMakeFiles\\boo.dir\\link.txt --verbose=1
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E rm -f CMakeFiles\\boo.dir/objects.a
+        C:\\msys64\\mingw64\\bin\\ar.exe qc CMakeFiles\\boo.dir/objects.a @CMakeFiles\\boo.dir\\objects1.rsp
+        C:\\msys64\\mingw64\\bin\\g++.exe -flto=auto -fno-fat-lto-objects -Wl,--whole-archive CMakeFiles\\boo.dir/objects.a -Wl,--no-whole-archive -o boo.exe -Wl,--out-implib,libboo.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\\boo.dir\\linkLibs.rsp
+        mingw32-make[2]: Leaving directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        [100%] Built target boo
+        mingw32-make[1]: Leaving directory 'C:/Users/foxyn/Documents/Coding/rascall-v4/build/CMakeFiles/_CMakeLTOTest-CXX/bin'
+        C:\\msys64\\mingw64\\bin\\cmake.exe -E cmake_progress_start C:\\Users\\foxyn\\Documents\\Coding\\rascall-v4\\build\\CMakeFiles\\_CMakeLTOTest-CXX\\bin\\CMakeFiles 0
+        
+      exitCode: 0
+...
