@@ -51,7 +51,7 @@ private:
     void orderMoves(MoveList& ml, Move ttMove, int ply);
     int  mvvLva(const Board& b, Move m) const;
     bool timeUp() const;
-    bool shouldStopEarly(float scale = 1.0f) const;  // Soft time check
+    bool shouldStopEarly() const;
     int  extension(const Board& b) const { return b.inCheck() ? 1 : 0; }
 
     // Aspiration window search

@@ -7,23 +7,30 @@ Searcher Engine;
 
 static const int PIECE_VAL[7] = { 100, 320, 330, 500, 900, 20000, 0 };
 
+// ── Futility pruning margins ─────────────────────────────────────────────────
+// If static eval + margin < alpha, we can skip quiet moves at this depth
+static const int FUTILITY_MARGIN[4] = { 0, 150, 300, 500 };
+
+// ── Reverse futility pruning margins ─────────────────────────────────────────
+// If static eval - margin >= beta, we can return beta without searching
+static const int REVERSE_FUTILITY_MARGIN[4] = { 0, 100, 200, 350 };
+
+// ── Razoring margin ──────────────────────────────────────────────────────────
+static const int RAZOR_MARGIN = 400;
+
 // ── Time management ───────────────────────────────────────────────────────────
 bool Searcher::timeUp() const {
     if (timeLimit_ <= 0) return false;
-    // Only hit the clock every 2048 nodes — steady_clock::now() is cheap but not free,
-    // and calling it on literally every node measurably slows down NPS at high depths.
-    if ((nodes_ & 2047) != 0) return timeUpCached_;
     auto now = std::chrono::steady_clock::now();
     int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    timeUpCached_ = (elapsed >= timeLimit_);
-    return timeUpCached_;
+    return elapsed >= timeLimit_;
 }
 
-bool Searcher::shouldStopEarly(float scale) const {
+bool Searcher::shouldStopEarly() const {
     if (softLimit_ <= 0) return false;
     auto now = std::chrono::steady_clock::now();
     int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    return elapsed >= int(softLimit_ * scale);
+    return elapsed >= softLimit_;
 }
 
 void Searcher::setTimeLimits(int softMs, int hardMs) {
@@ -32,7 +39,7 @@ void Searcher::setTimeLimits(int softMs, int hardMs) {
     startTime_ = std::chrono::steady_clock::now();
 }
 
-// ── Move ordering ─────────────────────────────────────────────────────────────
+// ── Move ordering ────────────────────────────────────────────────────────────
 static void orderMovesWithBoard(const Board& b, MoveList& ml, Move ttMove, Move killers[2], int history[64][64]) {
     static int scores[MAX_MOVES];
     for (int i = 0; i < ml.count; i++) {
@@ -58,7 +65,14 @@ static void orderMovesWithBoard(const Board& b, MoveList& ml, Move ttMove, Move 
 
 // ── Quiescence search ─────────────────────────────────────────────────────────
 int Searcher::quiesce(Board& b, int alpha, int beta) {
-    if (stop) return 0;
+    if (stop || timeUp()) return 0;
+
+    // Check time every 1024 nodes
+    if ((nodes_ & 1023) == 0 && timeUp()) {
+        stop = true;
+        return 0;
+    }
+
     nodes_++;
 
     int stand_pat = evaluate(b);
@@ -82,12 +96,15 @@ int Searcher::quiesce(Board& b, int alpha, int beta) {
     return alpha;
 }
 
-// ── Main alpha-beta with mate distance tracking ───────────────────────────────
+// ── Main alpha-beta with modern pruning ─────────────────────────────────────
 int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool nullOk) {
-    if (stop || timeUp()) return 0;
+    // Aggressive time check
+    if ((nodes_ & 1023) == 0 && timeUp()) {
+        stop = true;
+        return 0;
+    }
+    if (stop) return 0;
     nodes_++;
-
-    pvLen_[ply] = 0;
 
     // Mate distance pruning
     int mateAlpha = std::max(alpha, -MATE_SCORE + ply);
@@ -106,6 +123,25 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
 
     bool inCheck = b.inCheck();
     if (inCheck) depth++;
+
+    // ── REVERSE FUTILITY PRUNING (static null move) ─────────────────────────
+    // If we're way ahead, don't bother searching
+    if (!inCheck && ply > 0 && nullOk && depth <= 3) {
+        int staticEval = evaluate(b);
+        int margin = REVERSE_FUTILITY_MARGIN[std::min(depth, 3)];
+        if (staticEval - margin >= beta) {
+            return beta;
+        }
+    }
+
+    // ── RAZORING ─────────────────────────────────────────────────────────────
+    // At pre-frontier nodes, if eval + margin < alpha, drop to quiescence
+    if (!inCheck && ply > 0 && depth == 3) {
+        int staticEval = evaluate(b);
+        if (staticEval + RAZOR_MARGIN < alpha) {
+            return quiesce(b, alpha, beta);
+        }
+    }
 
     Move ttMove = NULL_MOVE;
     int ttMateIn = 0;
@@ -145,6 +181,14 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
     TTFlag flag    = TT_UPPER;
     int  bestMateIn = 0;
 
+    // ── FUTILITY PRUNING setup ───────────────────────────────────────────────
+    bool canFutilityPrune = false;
+    int futilityBase = 0;
+    if (!inCheck && ply > 0 && depth <= 3) {
+        futilityBase = evaluate(b);
+        canFutilityPrune = true;
+    }
+
     for (int i = 0; i < ml.count; i++) {
         Move m = ml.moves[i];
         b.makeMove(m);
@@ -152,6 +196,16 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
             b.unmakeMove(); continue;
         }
         movesMade++;
+
+        // ── FUTILITY PRUNING ────────────────────────────────────────────────
+        // Skip quiet moves that can't possibly raise alpha
+        if (canFutilityPrune && movesMade > 1 && !isCapture(m) && !isPromo(m) && !b.inCheck()) {
+            int margin = FUTILITY_MARGIN[std::min(depth, 3)];
+            if (futilityBase + margin <= alpha) {
+                b.unmakeMove();
+                continue;
+            }
+        }
 
         int score;
         // Late Move Reduction (LMR)
@@ -174,15 +228,7 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
             bestScore = score;
             bestMove = m;
             bestMateIn = scoreToMateIn(score, ply + 1);
-
-            // === BUILD PV ===
-            pv_[ply][0] = m;
-            for (int j = 0; j < pvLen_[ply + 1]; j++) {
-                pv_[ply][j + 1] = pv_[ply + 1][j];
-            }
-            pvLen_[ply] = pvLen_[ply + 1] + 1;
         }
-        
         if (score > alpha) {
             alpha = score;
             flag  = TT_EXACT;
@@ -254,44 +300,27 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
     softLimit_ = lim.softTime;
     nodes_     = 0;
     stop       = false;
-    timeUpCached_ = false;
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
 
     TT.newSearch();
 
-    // ── Opening book probe (instant, no thinking) ────────────────────────────
-    if (lim.useBook) {
-        Move bookMove = Book.probe(b);
-        if (bookMove != NULL_MOVE) {
-            SearchResult res;
-            res.bestMove = bookMove;
-            res.score    = 0;
-            res.depth    = 1;
-            res.nodes    = 1;
-            res.mateIn   = 0;
-            auto now = std::chrono::steady_clock::now();
-            res.timeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-            std::cout << "info depth 1 score cp 0 nodes 1 time " << res.timeMs 
-            << " pv " << moveToStr(bookMove) << " bookmove" << std::endl;
-            return res;
-        }
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
     SearchResult result;
     Move bestMove = NULL_MOVE;
-    Move prevBestMove = NULL_MOVE;
     int bestMateIn = 0;
     int prevScore = 0;
-    int stableDepths = 0;  // how many consecutive depths the best move hasn't changed
 
     for (int depth = 1; depth <= lim.depth; depth++) {
-        // Soft time check: stop after depth 2 so we always have a real result.
-        // Give extra time if the best move keeps changing (unstable position).
-        if (depth > 2 && bestMove != NULL_MOVE) {
-            float stabilityScale = (stableDepths >= 3) ? 0.75f : 1.0f; // stop sooner if stable
-            if (shouldStopEarly(stabilityScale)) break;
+        // Check soft limit BEFORE starting new depth
+        if (depth > 2 && shouldStopEarly() && bestMove != NULL_MOVE) {
+            if (!isMateScore(prevScore) && !isMateScore(-prevScore)) {
+                break;
+            }
+        }
+
+        // Check hard limit
+        if (timeUp()) {
+            if (bestMove != NULL_MOVE) break;
         }
 
         int score;
@@ -313,13 +342,6 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
             bestMateIn = tte->mateIn;
         }
 
-        // Track stability: count consecutive depths where best move didn't change
-        if (bestMove == prevBestMove && bestMove != NULL_MOVE)
-            stableDepths++;
-        else
-            stableDepths = 0;
-        prevBestMove = bestMove;
-
         result.bestMove = bestMove;
         result.score    = score;
         result.depth    = depth;
@@ -331,26 +353,22 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         int nps  = (ms > 0) ? (int)(nodes_ / ms * 1000) : 0;
         result.timeMs = ms;
 
-        // Output info with proper newlines
-        std::cout << "info depth " << depth;
+        // === BUILD INFO LINE AS SINGLE STRING ===
+        std::string infoLine = "info depth " + std::to_string(depth);
 
         if (bestMateIn != 0) {
-            std::cout << " score mate " << bestMateIn;
+            infoLine += " score mate " + std::to_string(bestMateIn);
         } else {
-            std::cout << " score cp " << score;
+            infoLine += " score cp " + std::to_string(score);
         }
 
-        std::cout << " nodes " << nodes_
-                  << " nps " << nps
-                  << " time " << ms
-                  << " hashfull " << TT.hashfull();
+        infoLine += " nodes " + std::to_string(nodes_);
+        infoLine += " nps " + std::to_string(nps);
+        infoLine += " time " + std::to_string(ms);
+        infoLine += " hashfull " + std::to_string(TT.hashfull());
 
         // Build PV from TT
-        std::cout << " pv";
-        for (int i = 0; i < pvLen_[0]; i++) {
-            std::cout << " " << moveToStr(pv_[0][i]);
-        }
-        std::cout << std::endl;
+        infoLine += " pv";
         Board pvBoard = b;
         Move pvMove = bestMove;
         int pvLen = 0;
@@ -363,15 +381,16 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
             if (repeat) break;
             pvHashes[pvLen] = pvBoard.hash;
 
-            std::cout << " " << moveToStr(pvMove);
+            infoLine += " " + moveToStr(pvMove);
             pvBoard.makeMove(pvMove);
             TTEntry* pvTte = TT.probe(pvBoard.hash);
             pvMove = (pvTte && pvTte->move != NULL_MOVE) ? pvTte->move : NULL_MOVE;
             pvLen++;
         }
-        std::cout << std::endl;
 
-        // If we found a forced mate, stop searching deeper
+        std::cout << infoLine << std::endl;
+
+        // Stop if forced mate found
         if (bestMateIn > 0 && bestMateIn <= (depth + 1) / 2) {
             break;
         }

@@ -3,6 +3,8 @@
 #include <fstream>
 #include <iostream>
 
+static U64 fileMask(int file) { return 0x0101010101010101ULL << file; }
+
 EvalWeights EW;
 
 // ── Phase calculation for tapered eval ───────────────────────────────────────

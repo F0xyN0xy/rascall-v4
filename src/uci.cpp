@@ -7,40 +7,13 @@
 #include <fstream>
 #include <chrono>
 
-// ── Stream stats (optional, for OBS overlay) ──────────────────────────────────
-void writeStreamStats(const Board& b, const SearchResult& sr, int elapsedMs) {
-    static int moveCounter = 0;
-    moveCounter++;
-
-    std::ofstream f("C:/Users/foxyn/Documents/Coding/Streaming/engine_stats.json");
-    if (!f) return;
-
-    f << "{\n";
-    f << "  \"engine\": \"Rascall v4\",\n";
-    f << "  \"depth\": " << sr.depth << ",\n";
-    f << "  \"nodes\": " << sr.nodes << ",\n";
-    f << "  \"nps\": " << (elapsedMs > 0 ? (int)(sr.nodes * 1000.0 / elapsedMs) : 0) << ",\n";
-    if (sr.mateIn != 0) {
-        f << "  \"mate\": " << sr.mateIn << ",\n";
-        f << "  \"eval\": \"Mate in " << std::abs(sr.mateIn) << "\",\n";
-    } else {
-        f << "  \"eval\": " << sr.score << ",\n";
-    }
-    f << "  \"time\": " << elapsedMs << ",\n";
-    f << "  \"pv\": \"" << moveToStr(sr.bestMove) << "\",\n";
-    f << "  \"moveNumber\": " << moveCounter << "\n";
-    f << "}\n";
-}
-
 // ── Global state ──────────────────────────────────────────────────────────────
 static Board gBoard;
 static std::thread searchThread;
 static Move ponderMove = NULL_MOVE;
 static bool isPondering = false;
 static SearchLimits currentLimits;
-static bool gUseBook = true;  // can be toggled via setoption
-// Store clock at the time of the last "go ponder" so ponderhit can use it
-static int gPonderWtime = 0, gPonderBtime = 0, gPonderWinc = 0, gPonderBinc = 0, gPonderMovestogo = 0;
+static bool useBook = true;  // ← ADDED: track book setting
 
 // ── Parse position ────────────────────────────────────────────────────────────
 static void parsePosition(const std::string& line) {
@@ -76,19 +49,10 @@ static int estimateGamePhaseFast(const Board& b) {
 // ── FAST complexity estimate (no movegen!) ────────────────────────────────────
 static int estimateComplexityFast(const Board& b) {
     int complexity = 0;
-
-    // Piece count
     complexity += popcount(b.occ[2]) * 2;
-
-    // Pawns
     complexity += popcount(b.pieceBB(WHITE, PAWN) | b.pieceBB(BLACK, PAWN));
-
-    // Checks
     if (b.inCheck()) complexity += 30;
-
-    // Material imbalance
     complexity += std::abs(popcount(b.occ[WHITE]) - popcount(b.occ[BLACK])) * 3;
-
     return complexity;
 }
 
@@ -100,58 +64,50 @@ static void calculateTimeLimits(int myTime, int myInc, int movestogo,
         return;
     }
 
+    int phase = estimateGamePhaseFast(b);
     int complexity = estimateComplexityFast(b);
 
-    // --- Base allocation ---
-    // Estimate moves remaining. Stockfish-style: assume ~50 moves left in opening,
-    // scaling down as pieces come off. movestogo overrides if provided.
-    float movesLeft;
-    if (movestogo > 0) {
-        movesLeft = (float)movestogo;
-    } else {
-        int phase = estimateGamePhaseFast(b);
-        // phase ranges from ~28 (opening, all pieces) to 0 (bare kings)
-        // Map to expected moves left: opening ~40, midgame ~30, endgame ~20
-        if      (phase > 22) movesLeft = 40.0f;
-        else if (phase > 14) movesLeft = 35.0f;
-        else if (phase > 7)  movesLeft = 28.0f;
-        else                 movesLeft = 18.0f;
+    // MUCH more conservative factors
+    float baseFactor;
+    if (phase > 24)       baseFactor = 0.008f;   // Opening: 0.8%
+    else if (phase > 12)  baseFactor = 0.015f;   // Middlegame: 1.5%
+    else if (phase > 6)   baseFactor = 0.025f;   // Endgame: 2.5%
+    else                  baseFactor = 0.040f;   // Late endgame: 4%
+
+    if (movestogo > 0 && movestogo < 10) {
+        baseFactor *= 0.7f;
     }
 
-    // Usable time = current clock + expected future increments
-    // Use 80% of the projected total to leave a safety buffer
-    float usableTime = myTime + myInc * std::min(movesLeft - 1.0f, 30.0f);
-    float baseMs = usableTime / movesLeft * 0.85f;
-
-    // --- Complexity scaling ---
     float complexityMult = 1.0f;
-    if      (complexity > 60) complexityMult = 1.35f;
-    else if (complexity > 40) complexityMult = 1.15f;
-    else if (complexity < 15) complexityMult = 0.80f;
+    if (complexity > 50)      complexityMult = 1.2f;
+    else if (complexity > 30) complexityMult = 1.1f;
+    else if (complexity < 15) complexityMult = 0.8f;
 
-    // --- movestogo urgency: give MORE time when close to time control ---
-    if (movestogo > 0 && movestogo <= 5) {
-        complexityMult *= 1.4f;   // urgent — spend more per move
-    } else if (movestogo > 0 && movestogo <= 10) {
-        complexityMult *= 1.15f;
+    float incBonus = myInc * 0.4f;
+
+    softMs = int(myTime * baseFactor * complexityMult + incBonus);
+    hardMs = int(myTime * baseFactor * complexityMult * 1.8f + incBonus);
+
+    // ABSOLUTE CAPS
+    int maxTime = myTime / 15;
+    int maxSoft = myTime / 25;
+
+    if (phase > 24) {
+        maxTime = std::min(maxTime, 2000);   // Max 2s in opening
+        maxSoft = std::min(maxSoft, 1200);   // Soft: 1.2s
     }
 
-    softMs = int(baseMs * complexityMult);
+    hardMs = std::min(hardMs, maxTime);
+    softMs = std::min(softMs, maxSoft);
 
-    // Hard limit: allow up to 4x soft, but never more than 1/4 of remaining clock
-    // (Stockfish uses roughly 3-5x the soft limit as hard limit)
-    hardMs = int(softMs * 3.5f);
-    hardMs = std::min(hardMs, myTime / 4);
-    hardMs = std::max(hardMs, softMs + 50);
+    hardMs = std::max(hardMs, softMs + 100);
 
-    // Safety floors
-    if (softMs < 20)  softMs = 20;
-    if (hardMs < 50)  hardMs = 50;
+    if (softMs < 50) softMs = 50;
+    if (hardMs < 100) hardMs = 100;
 
-    // Never exceed half the clock no matter what
-    hardMs = std::min(hardMs, myTime / 2);
-    softMs = std::min(softMs, hardMs - 20);
-    if (softMs < 20) softMs = 20;
+    int overhead = 100;
+    hardMs = std::max(50, hardMs - overhead);
+    softMs = std::max(50, softMs - overhead);
 }
 
 // ── Start search thread ───────────────────────────────────────────────────────
@@ -172,14 +128,6 @@ static void startSearch(const SearchLimits& lim) {
         auto searchEnd = std::chrono::steady_clock::now();
         int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(searchEnd - searchStart).count();
 
-        writeStreamStats(b, result, elapsedMs);
-
-        std::cout << "bestmove " << moveToStr(result.bestMove);
-        if (ponderMove != NULL_MOVE && !lim.ponder) {
-            std::cout << " ponder " << moveToStr(ponderMove);
-        }
-        std::cout << "\n";
-        std::cout.flush();
     });
 }
 
@@ -206,17 +154,18 @@ static void parseGo(const std::string& line) {
         if (token == "ponder")    { doPonder = true; }
     }
 
-    // === INSTANT BOOK MOVE — no thread, no search ===
-    if (gUseBook && !doPonder && !lim.infinite && lim.movetime == 0) {
+    // === INSTANT BOOK MOVE — NO SEARCH THREAD AT ALL ===
+    if (useBook && !doPonder && !lim.infinite && lim.movetime == 0 && !depthSet) {
         Move bookMove = Book.probe(gBoard);
         if (bookMove != NULL_MOVE) {
             std::cout << "info depth 1 score cp 0 nodes 1 time 0 pv " 
-                      << moveToStr(bookMove) << " bookmove" << std::endl;
+                      << moveToStr(bookMove) << std::endl;
             std::cout << "bestmove " << moveToStr(bookMove) << std::endl;
             std::cout.flush();
-            return;
+            return; // DONE — no thread started, no delay
         }
     }
+    // ===
 
     // Time management
     if (!lim.movetime && !lim.infinite && !depthSet) {
@@ -238,11 +187,6 @@ static void parseGo(const std::string& line) {
         lim.movetime = 0;
         lim.softTime = 0;
 
-        // Save clock values so ponderhit can compute proper time limits
-        gPonderWtime = wtime; gPonderBtime = btime;
-        gPonderWinc  = winc;  gPonderBinc  = binc;
-        gPonderMovestogo = movestogo;
-
         TTEntry* tte = TT.probe(gBoard.hash);
         if (tte && tte->move != NULL_MOVE) {
             ponderMove = tte->move;
@@ -252,7 +196,6 @@ static void parseGo(const std::string& line) {
         ponderMove = NULL_MOVE;
     }
 
-    lim.useBook = gUseBook;
     startSearch(lim);
 }
 
@@ -261,7 +204,7 @@ void uciLoop() {
     EW.load("weights.bin");
 
     if (!Book.loadPolyglot("book.bin")) {
-        std::cout << "info string No external book, using built-in repertoire\n";
+        std::cout << "info string No external book, using built-in repertoire";
         Book.initBuiltinRepertoire();
     }
 
@@ -274,18 +217,18 @@ void uciLoop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rascall v4\n";
-            std::cout << "id author FoxyNet475\n";
-            std::cout << "option name Hash type spin default 64 min 1 max 1024\n";
-            std::cout << "option name Depth type spin default 0 min 0 max 64\n";
-            std::cout << "option name BookFile type string default book.bin\n";
-            std::cout << "option name UseBook type check default true\n";
-            std::cout << "option name Ponder type check default true\n";
-            std::cout << "uciok\n";
+            std::cout << "id name Rascall v4";
+            std::cout << "id author FoxyNet475";
+            std::cout << "option name Hash type spin default 64 min 1 max 1024";
+            std::cout << "option name Depth type spin default 0 min 0 max 64";
+            std::cout << "option name BookFile type string default book.bin";
+            std::cout << "option name UseBook type check default true";
+            std::cout << "option name Ponder type check default true";
+            std::cout << "uciok";
             std::cout.flush();
         }
         else if (cmd == "isready") {
-            std::cout << "readyok\n";
+            std::cout << "readyok";
             std::cout.flush();
         }
         else if (cmd == "ucinewgame") {
@@ -304,13 +247,13 @@ void uciLoop() {
                 int mb = std::stoi(val);
                 TT.resize(mb);
             }
-            else if (name == "UseBook") {
-                gUseBook = (val == "true");
-            }
             else if (name == "BookFile") {
                 if (!Book.loadPolyglot(val)) {
                     Book.initBuiltinRepertoire();
                 }
+            }
+            else if (name == "UseBook") {   // ← ADDED
+                useBook = (val == "true");
             }
             else if (name == "Depth") {
                 int d = std::stoi(val);
@@ -331,15 +274,9 @@ void uciLoop() {
         else if (cmd == "ponderhit") {
             if (isPondering) {
                 isPondering = false;
-
-                // Use the clock that was sent with the original "go ponder" command
-                int myTime = (gBoard.sideToMove == WHITE) ? gPonderWtime : gPonderBtime;
-                int myInc  = (gBoard.sideToMove == WHITE) ? gPonderWinc  : gPonderBinc;
-                if (myTime <= 0) myTime = 5000; // fallback
-
+                int myTime = (gBoard.sideToMove == WHITE) ? 30000 : 30000;
                 int softMs, hardMs;
-                calculateTimeLimits(myTime, myInc, gPonderMovestogo, softMs, hardMs, gBoard);
-
+                calculateTimeLimits(myTime, 0, 0, softMs, hardMs, gBoard);
                 Engine.setTimeLimits(softMs, hardMs);
             }
         }
@@ -357,7 +294,7 @@ void uciLoop() {
             auto t1 = std::chrono::steady_clock::now();
             int ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1-t0).count();
             std::cout << "Perft(" << depth << ") = " << nodes
-                      << "  time: " << ms << "ms\n";
+                      << "  time: " << ms << "ms";
         }
         else if (cmd == "display") {
             gBoard.print();
@@ -373,12 +310,12 @@ void uciLoop() {
         }
         else if (cmd == "eval") {
             gBoard.print();
-            std::cout << "Static eval: " << evaluate(gBoard) << " cp\n";
+            std::cout << "Static eval: " << evaluate(gBoard) << " cp";
         }
-                else if (cmd == "gensfen") {
+        else if (cmd == "gensfen") {
             GensfenOptions opts;
             std::string value;
-            
+
             while (ss >> cmd) {
                 if (cmd == "depth") {
                     ss >> value; opts.searchDepth = std::stoi(value);
@@ -411,7 +348,7 @@ void uciLoop() {
                     ss >> value; opts.numThreads = std::stoi(value);
                 }
             }
-            
+
             generateTrainingData(opts);
         }
     }

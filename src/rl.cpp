@@ -73,14 +73,12 @@ static std::string getRandomOpening() {
 }
 
 // ── Weight serialization ──────────────────────────────────────────────────────
+// NOTE: PST removed from tunable weights. Only material, pawn structure,
+// mobility, and king safety are tuned via SPSA now.
 void RLTrainer::weightsToVec(const EvalWeights& w, std::vector<float>& v) {
     v.clear();
     // Material values (not king)
     for (int i = 0; i < 5; i++) v.push_back(float(w.material[i]));
-    // PST values (all pieces except king for simplicity)
-    for (int pt = 0; pt < 5; pt++)
-        for (int sq = 0; sq < 64; sq++)
-            v.push_back(float(w.pst[pt][sq]));
     // Pawn structure
     v.push_back(float(w.doubledPawnPenalty));
     v.push_back(float(w.isolatedPawnPenalty));
@@ -94,9 +92,6 @@ void RLTrainer::weightsToVec(const EvalWeights& w, std::vector<float>& v) {
 void RLTrainer::vecToWeights(const std::vector<float>& v, EvalWeights& w) {
     int idx = 0;
     for (int i = 0; i < 5; i++) w.material[i] = int(v[idx++]);
-    for (int pt = 0; pt < 5; pt++)
-        for (int sq = 0; sq < 64; sq++)
-            w.pst[pt][sq] = int(v[idx++]);
     w.doubledPawnPenalty  = int(v[idx++]);
     w.isolatedPawnPenalty = int(v[idx++]);
     for (int i = 0; i < 8; i++) w.passedPawnBonus[i] = int(v[idx++]);
@@ -105,7 +100,8 @@ void RLTrainer::vecToWeights(const std::vector<float>& v, EvalWeights& w) {
 }
 
 int RLTrainer::weightDim() {
-    std::vector<float> v; weightsToVec(EvalWeights{}, v); return int(v.size());
+    // Material(5) + doubled(1) + isolated(1) + passed(8) + mobility(5) + shield(1)
+    return 5 + 1 + 1 + 8 + 5 + 1; // = 21
 }
 
 // ── Game-over detection ───────────────────────────────────────────────────────
@@ -150,32 +146,26 @@ bool RLTrainer::isGameOver(Board& b, GameResult& result, int moveCount) {
 // ── Play one full game, alternating weights w1 (white) vs w2 (black) ─────────
 GameResult RLTrainer::playGame(EvalWeights& w1, EvalWeights& w2) {
     Board b;
-    
+
     // Random opening position
     static std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<> dist(0, TRAINING_OPENINGS.size() - 1);
     b.setFEN(TRAINING_OPENINGS[dist(rng)]);
-    
-    // Play 2-4 random moves from both sides to increase diversity
-    // (optional: ensures we don't always start at the same position in the line)
-    
+
     SearchLimits lim;
     lim.useBook = false;  // NEVER use book in training
-    
+
     GameResult result = DRAW_RESULT;
     int moveCount = 0;
-    
+
     while (true) {
         if (isGameOver(b, result, moveCount)) break;
-        
+
         EvalWeights savedEW = EW;
         EW = (b.sideToMove == WHITE) ? w1 : w2;
-        
+
         // Asymmetric depth: one side searches 1 ply deeper
-        // This creates imbalance → more wins/losses → stronger gradient
         if (cfg.asymmetricDepth) {
-            bool w1IsWhite = (&w1 == &EW);  // crude check, better to pass as param
-            // Actually, let's just alternate:
             if (moveCount % 4 < 2) {
                 lim.depth = cfg.selfPlayDepth;
             } else {
@@ -184,13 +174,13 @@ GameResult RLTrainer::playGame(EvalWeights& w1, EvalWeights& w2) {
         } else {
             lim.depth = cfg.selfPlayDepth;
         }
-        
+
         lim.movetime = 0;  // Fixed depth only, no time management
-        
+
         TT.clear();
         SearchResult sr = Engine.search(b, lim);
         EW = savedEW;
-        
+
         if (sr.bestMove == NULL_MOVE) { result = DRAW_RESULT; break; }
         b.makeMove(sr.bestMove);
         moveCount++;
