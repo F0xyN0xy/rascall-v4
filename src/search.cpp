@@ -160,7 +160,7 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
     if (!inCheck && ply > 0 && depth == 3) {
         int staticEval = evaluate(b);
         if (staticEval + RAZOR_MARGIN < alpha) {
-            return quiesce(b, alpha, beta);
+            return quiesce(b, alpha, beta, ply);
         }
     }
 
