@@ -127,6 +127,10 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
     if (stop) return 0;
     nodes_++;
 
+    // Start this node's PV as empty. A TT cutoff may leave it empty;
+    // a searched alpha-improving move will populate it below.
+    if (ply < MAX_PLY) pvLen_[ply] = ply;
+
     // Mate distance pruning
     int mateAlpha = std::max(alpha, -MATE_SCORE + ply);
     int mateBeta  = std::min(beta,  MATE_SCORE - ply - 1);
@@ -253,6 +257,19 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
         if (score > alpha) {
             alpha = score;
             flag  = TT_EXACT;
+
+            // Preserve the actual searched principal variation instead of
+            // reconstructing it from TT entries that can be overwritten.
+            if (ply < MAX_PLY - 1) {
+                pv_[ply][ply] = m;
+                const int childPvEnd = std::min(pvLen_[ply + 1], MAX_PLY);
+                for (int j = ply + 1; j < childPvEnd; ++j)
+                    pv_[ply][j] = pv_[ply + 1][j];
+                pvLen_[ply] = std::max(ply + 1, childPvEnd);
+            } else {
+                pv_[ply][ply] = m;
+                pvLen_[ply] = ply + 1;
+            }
             if (!isCapture(m)) {
                 history_[fromSq(m)][toSq(m)] += depth * depth;
                 if (history_[fromSq(m)][toSq(m)] > 1'000'000)
@@ -328,6 +345,8 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
     // The caller owns the stop flag so an immediate UCI stop cannot be lost.
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
+    std::memset(pv_, 0, sizeof(pv_));
+    std::fill(std::begin(pvLen_), std::end(pvLen_), 0);
 
     TT.newSearch();
 
@@ -362,11 +381,14 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
 
         prevScore = score;
 
-        TTEntry* tte = TT.probe(b.hash);
-        if (tte && tte->move != NULL_MOVE) {
-            bestMove = tte->move;
-            bestMateIn = tte->mateIn;
+        // The root PV is authoritative for the completed iteration. It is
+        // built during alpha-beta and does not depend on TT chain stability.
+        if (pvLen_[0] > 0 && pv_[0][0] != NULL_MOVE) {
+            bestMove = pv_[0][0];
+            result.ponderMove = pvLen_[0] > 1 ? pv_[0][1] : NULL_MOVE;
         }
+        TTEntry* tte = TT.probe(b.hash);
+        if (tte) bestMateIn = tte->mateIn;
 
         result.bestMove = bestMove;
         result.score    = score;
@@ -393,25 +415,12 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         infoLine += " time " + std::to_string(ms);
         infoLine += " hashfull " + std::to_string(TT.hashfull());
 
-        // Build PV from TT
+        // Emit the PV captured directly from the completed alpha-beta search.
         infoLine += " pv";
-        Board pvBoard = b;
-        Move pvMove = bestMove;
-        int pvLen = 0;
-        U64 pvHashes[32] = {};
-        while (pvMove != NULL_MOVE && pvLen < 12) {
-            bool repeat = false;
-            for (int i = 0; i < pvLen; i++) {
-                if (pvHashes[i] == pvBoard.hash) { repeat = true; break; }
-            }
-            if (repeat) break;
-            pvHashes[pvLen] = pvBoard.hash;
-
-            infoLine += " " + moveToStr(pvMove);
-            pvBoard.makeMove(pvMove);
-            TTEntry* pvTte = TT.probe(pvBoard.hash);
-            pvMove = (pvTte && pvTte->move != NULL_MOVE) ? pvTte->move : NULL_MOVE;
-            pvLen++;
+        const int rootPvLen = std::min(pvLen_[0], 32);
+        for (int i = 0; i < rootPvLen; ++i) {
+            if (pv_[0][i] == NULL_MOVE) break;
+            infoLine += " " + moveToStr(pv_[0][i]);
         }
 
         std::cout << infoLine << std::endl;
