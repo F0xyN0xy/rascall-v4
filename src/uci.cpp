@@ -164,6 +164,7 @@ static Move findPonderReply(Board board, Move bestMove) {
 static void startSearch(const SearchLimits& lim) {
     stopSearch();
     Engine.stop = false;
+    if (lim.ponder) Engine.setTimeLimits(0, 0);
     currentLimits = lim;
 
     // Snapshot the position before launching the worker. The UCI thread may
