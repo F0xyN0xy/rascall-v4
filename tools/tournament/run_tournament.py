@@ -26,8 +26,8 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STOCKFISH = Path(
-    r"C:\Users\foxyn\Documents\stockfish\stockfish-windows-x86-64-universal.exe"
-)
+    __import__("os").environ.get("STOCKFISH_PATH", "")
+).expanduser() if __import__("os").environ.get("STOCKFISH_PATH") else None
 DEFAULT_V4_CANDIDATES = (
     ROOT / "build" / "Release" / "rascall-v4.exe",
     ROOT / "build" / "rascall-v4.exe",
@@ -41,7 +41,7 @@ def discover_engines() -> dict[str, Path]:
         if candidate.is_file():
             engines["Rascall V4"] = candidate
             break
-    if DEFAULT_STOCKFISH.is_file():
+    if DEFAULT_STOCKFISH and DEFAULT_STOCKFISH.is_file():
         engines["Stockfish 19"] = DEFAULT_STOCKFISH
     return engines
 
@@ -148,8 +148,10 @@ def open_engine(name: str, path: Path, hash_mb: int) -> chess.engine.SimpleEngin
     if not path.is_file():
         raise SystemExit(f"Engine executable not found: {name}: {path}")
     try:
+        resolved = path.resolve()
+        working_directory = ROOT if ROOT == resolved or ROOT in resolved.parents else path.parent
         engine = chess.engine.SimpleEngine.popen_uci(
-            [str(path)], cwd=str(path.parent), timeout=10.0
+            [str(path)], cwd=str(working_directory), timeout=10.0
         )
         configure_engine(engine, hash_mb)
         return engine
