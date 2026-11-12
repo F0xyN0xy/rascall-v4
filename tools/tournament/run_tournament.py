@@ -183,6 +183,7 @@ def play_game(
     engines = {chess.WHITE: white_engine, chess.BLACK: black_engine}
     names = {chess.WHITE: white_name, chess.BLACK: black_name}
     start_time = time.monotonic()
+    clocks = {chess.WHITE: args.tc, chess.BLACK: args.tc}
     ply = 0
 
     while not board.is_game_over(claim_draw=True) and ply < args.max_plies:
@@ -190,11 +191,19 @@ def play_game(
         engine = engines[mover]
         before_fen = board.fen()
         try:
+            move_started = time.monotonic()
             result = engine.play(
                 board,
-                chess.engine.Limit(time=args.tc, inc=args.inc),
+                chess.engine.Limit(
+                    white_clock=clocks[chess.WHITE],
+                    black_clock=clocks[chess.BLACK],
+                    white_inc=args.inc,
+                    black_inc=args.inc,
+                ),
                 info=chess.engine.INFO_ALL,
             )
+            elapsed = time.monotonic() - move_started
+            clocks[mover] = max(0.0, clocks[mover] - elapsed + args.inc)
         except Exception as exc:
             raise RuntimeError(
                 f"{names[mover]} failed on ply {ply + 1} ({before_fen}): {exc}"
