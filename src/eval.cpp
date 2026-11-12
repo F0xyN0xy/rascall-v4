@@ -1,6 +1,7 @@
 #include "eval.h"
 #include "movegen.h"
 #include <fstream>
+#include <algorithm>
 #include <iostream>
 
 static U64 fileMask(int file) { return 0x0101010101010101ULL << file; }
@@ -154,29 +155,28 @@ static int evalPawns(const Board& b, Color c, int phase) {
     int score = 0;
     U64 pawns = b.pieceBB(c, PAWN);
     U64 allPawns = b.pieceBB(WHITE, PAWN) | b.pieceBB(BLACK, PAWN);
-    U64 ep = pawns;
+    // Charge once for each extra pawn on a file, not once for every pawn there.
+    for (int f = 0; f < 8; ++f) {
+        const int count = popcount(pawns & fileMask(f));
+        if (count > 1) {
+            const int extras = count - 1;
+            score += taper(EW.doubledPawnPenalty * extras,
+                           EW.doubledPawnPenalty * 2 * extras, phase);
+        }
+    }
 
+    U64 ep = pawns;
     while (ep) {
         int sq = lsb(ep); ep &= ep - 1;
         int f = fileOf(sq);
         int r = rankOf(sq);
 
-        // Doubled pawns (penalty)
-        U64 fm = fileMask(f);
-        if (popcount(pawns & fm) > 1) {
-            int mgPen = -10;
-            int egPen = -20;
-            score += taper(mgPen, egPen, phase);
-        }
-
-        // Isolated pawns (no friendly pawns on adjacent files)
+        // Isolated pawns (no friendly pawns on adjacent files) (no friendly pawns on adjacent files)
         U64 adjFiles = 0;
         if (f > 0) adjFiles |= fileMask(f - 1);
         if (f < 7) adjFiles |= fileMask(f + 1);
         if (!(pawns & adjFiles)) {
-            int mgIso = -12;
-            int egIso = -16;
-            score += taper(mgIso, egIso, phase);
+            score += EW.isolatedPawnPenalty;
         }
 
         // Passed pawns (no enemy pawns ahead)
@@ -205,16 +205,9 @@ static int evalPawns(const Board& b, Color c, int phase) {
             }
         }
 
-        // Backward pawns (can't be supported by friendly pawns)
-        if (c == WHITE) {
-            if (r > 0 && !(pawns & (fileMask(f) & ~(ALL << (r * 8))))) {
-                score += taper(-8, -12, phase);
-            }
-        } else {
-            if (r < 7 && !(pawns & (fileMask(f) & (ALL << ((r + 1) * 8))))) {
-                score += taper(-8, -12, phase);
-            }
-        }
+        // Backward-pawn scoring is omitted until adjacent-file support is
+        // evaluated correctly. The previous same-file test was not a valid
+        // backward-pawn detector.
     }
 
     return score;
@@ -234,7 +227,7 @@ static int evalKingSafety(const Board& b, Color c, int phase) {
         for (int dr = 1; dr <= 2; dr++) {
             int rr = (c == WHITE) ? r + dr : r - dr;
             if (rr < 0 || rr > 7) continue;
-            if (pawns & bit(makeSquare(ff, rr))) mgScore += 12;
+            if (pawns & bit(makeSquare(ff, rr))) mgScore += EW.kingShieldBonus;
         }
     }
 
@@ -323,32 +316,32 @@ static int evalMobility(const Board& b, Color c, int phase) {
     while (kn) {
         int sq = lsb(kn); kn &= kn - 1;
         int n = popcount(KNIGHT_ATTACKS[sq] & notUs);
-        mgScore += n * 2;
-        egScore += n * 2;
+        mgScore += n * EW.mobilityBonus[KNIGHT];
+        egScore += n * EW.mobilityBonus[KNIGHT];
     }
 
     U64 bi = b.pieceBB(c, BISHOP);
     while (bi) {
         int sq = lsb(bi); bi &= bi - 1;
         int n = popcount(bishopAttacks(sq, all) & notUs);
-        mgScore += n * 2;
-        egScore += n * 3;
+        mgScore += n * EW.mobilityBonus[BISHOP];
+        egScore += n * EW.mobilityBonus[BISHOP];
     }
 
     U64 ro = b.pieceBB(c, ROOK);
     while (ro) {
         int sq = lsb(ro); ro &= ro - 1;
         int n = popcount(rookAttacks(sq, all) & notUs);
-        mgScore += n * 3;
-        egScore += n * 4;
+        mgScore += n * EW.mobilityBonus[ROOK];
+        egScore += n * EW.mobilityBonus[ROOK];
     }
 
     U64 qu = b.pieceBB(c, QUEEN);
     while (qu) {
         int sq = lsb(qu); qu &= qu - 1;
         int n = popcount(queenAttacks(sq, all) & notUs);
-        mgScore += n * 1;
-        egScore += n * 2;
+        mgScore += n * EW.mobilityBonus[QUEEN];
+        egScore += n * EW.mobilityBonus[QUEEN];
     }
 
     return taper(mgScore, egScore, phase);
@@ -357,49 +350,36 @@ static int evalMobility(const Board& b, Color c, int phase) {
 // ── Piece threats / hanging pieces ───────────────────────────────────────────
 static int evalThreats(const Board& b, Color c, int phase) {
     int mgScore = 0, egScore = 0;
-    Color them = ~c;
-    U64 all = b.occ[2];
+    const Color them = ~c;
+    const U64 all = b.occ[2];
 
-    for (int pt = KNIGHT; pt <= QUEEN; pt++) {
-        U64 ourPieces = b.pieceBB(c, PieceType(pt));
-        while (ourPieces) {
-            int sq = lsb(ourPieces); ourPieces &= ourPieces - 1;
-            U64 attacks;
-            if (pt == KNIGHT) attacks = KNIGHT_ATTACKS[sq];
-            else if (pt == BISHOP) attacks = bishopAttacks(sq, all);
-            else if (pt == ROOK) attacks = rookAttacks(sq, all);
-            else if (pt == QUEEN) attacks = queenAttacks(sq, all);
-            else continue;
+    // Score each victim independently. A shared defended flag for a whole
+    // attack set incorrectly hid hanging pieces whenever another victim
+    // happened to be defended.
+    for (int victimType = KNIGHT; victimType <= QUEEN; ++victimType) {
+        U64 victims = b.pieceBB(them, PieceType(victimType));
+        while (victims) {
+            const int victimSq = lsb(victims);
+            victims &= victims - 1;
 
-            for (int ept = PAWN; ept <= QUEEN; ept++) {
-                if (ept <= pt) continue; // Only attack more valuable pieces
-                U64 victims = b.pieceBB(them, PieceType(ept)) & attacks;
-                if (!victims) continue;
+            const U64 attackers = b.attackersTo(victimSq, all) & b.occ[c];
+            if (!attackers) continue;
 
-                // Check if victim is defended (simplified)
-                bool defended = false;
-                U64 enemyAttacks = 0;
-                for (int dpt = PAWN; dpt <= QUEEN; dpt++) {
-                    U64 dp = b.pieceBB(them, PieceType(dpt));
-                    while (dp) {
-                        int dsq = lsb(dp); dp &= dp - 1;
-                        U64 datt;
-                        if (dpt == PAWN) datt = PAWN_ATTACKS[them][dsq];
-                        else if (dpt == KNIGHT) datt = KNIGHT_ATTACKS[dsq];
-                        else if (dpt == BISHOP) datt = bishopAttacks(dsq, all);
-                        else if (dpt == ROOK) datt = rookAttacks(dsq, all);
-                        else if (dpt == QUEEN) datt = queenAttacks(dsq, all);
-                        else continue;
-                        if (datt & victims) { defended = true; break; }
-                    }
-                    if (defended) break;
+            const U64 defenders = b.attackersTo(victimSq, all) & b.occ[them];
+            if (defenders) continue;
+
+            int leastAttackerValue = EW.material[KING];
+            for (int attackerType = PAWN; attackerType <= QUEEN; ++attackerType) {
+                if (attackers & b.pieceBB(c, PieceType(attackerType))) {
+                    leastAttackerValue = std::min(leastAttackerValue,
+                                                  EW.material[attackerType]);
                 }
+            }
 
-                if (!defended) {
-                    int value = EW.material[ept] - EW.material[pt];
-                    mgScore += value / 5;
-                    egScore += value / 4;
-                }
+            const int gain = EW.material[victimType] - leastAttackerValue;
+            if (gain > 0) {
+                mgScore += gain / 6;
+                egScore += gain / 5;
             }
         }
     }
