@@ -110,29 +110,52 @@ static void calculateTimeLimits(int myTime, int myInc, int movestogo,
     softMs = std::max(50, softMs - overhead);
 }
 
-// ── Start search thread ───────────────────────────────────────────────────────
-static void startSearch(const SearchLimits& lim) {
+// ── Search lifecycle and legal fallback ───────────────────────────────────────
+static void stopSearch() {
     if (searchThread.joinable()) {
         Engine.stop = true;
         searchThread.join();
     }
-    Engine.stop = false;
+}
 
-    auto searchStart = std::chrono::steady_clock::now();
+static Move firstLegalMove(Board b) {
+    MoveList moves;
+    generateMoves(b, moves);
+    for (int i = 0; i < moves.count; ++i) {
+        Move move = moves.moves[i];
+        b.makeMove(move);
+        bool legal = !b.isAttacked(b.kingSquare(~b.sideToMove), b.sideToMove);
+        b.unmakeMove();
+        if (legal) return move;
+    }
+    return NULL_MOVE;
+}
+
+// ── Start search thread ───────────────────────────────────────────────────────
+static void startSearch(const SearchLimits& lim) {
+    stopSearch();
+    Engine.stop = false;
     currentLimits = lim;
 
-    searchThread = std::thread([lim, searchStart]() {
-        Board b = gBoard;
-        SearchResult result = Engine.search(b, lim);
+    // Snapshot the position before launching the worker. The UCI thread may
+    // receive another command while the search is running.
+    Board searchBoard = gBoard;
+    searchThread = std::thread([lim, searchBoard]() mutable {
+        SearchResult result = Engine.search(searchBoard, lim);
+        Move bestMove = result.bestMove;
 
-        auto searchEnd = std::chrono::steady_clock::now();
-        int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(searchEnd - searchStart).count();
+        // A stop during the first iteration can leave the search without a PV.
+        // UCI still requires a bestmove response, so return a legal fallback.
+        if (bestMove == NULL_MOVE) bestMove = firstLegalMove(searchBoard);
 
+        if (bestMove == NULL_MOVE) std::cout << "bestmove 0000" << std::endl;
+        else std::cout << "bestmove " << moveToStr(bestMove) << std::endl;
     });
 }
 
 // ── Parse go command ──────────────────────────────────────────────────────────
 static void parseGo(const std::string& line) {
+    stopSearch();
     std::istringstream ss(line);
     std::string token;
     ss >> token; // "go"
@@ -204,7 +227,7 @@ void uciLoop() {
     EW.load("weights.bin");
 
     if (!Book.loadPolyglot("book.bin")) {
-        std::cout << "info string No external book, using built-in repertoire";
+        std::cerr << "info string No external book, using built-in repertoire\n";
         Book.initBuiltinRepertoire();
     }
 
@@ -217,27 +240,27 @@ void uciLoop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rascall v4";
-            std::cout << "id author FoxyNet475";
-            std::cout << "option name Hash type spin default 64 min 1 max 1024";
-            std::cout << "option name Depth type spin default 0 min 0 max 64";
-            std::cout << "option name BookFile type string default book.bin";
-            std::cout << "option name UseBook type check default true";
-            std::cout << "option name Ponder type check default true";
-            std::cout << "uciok";
-            std::cout.flush();
+            std::cout << "id name Rascall v4" << std::endl;
+            std::cout << "id author FoxyNet475" << std::endl;
+            std::cout << "option name Hash type spin default 64 min 1 max 1024" << std::endl;
+            std::cout << "option name Depth type spin default 0 min 0 max 64" << std::endl;
+            std::cout << "option name BookFile type string default book.bin" << std::endl;
+            std::cout << "option name UseBook type check default true" << std::endl;
+            std::cout << "option name Ponder type check default true" << std::endl;
+            std::cout << "uciok" << std::endl;
         }
         else if (cmd == "isready") {
-            std::cout << "readyok";
-            std::cout.flush();
+            std::cout << "readyok" << std::endl;
         }
         else if (cmd == "ucinewgame") {
+            stopSearch();
             TT.clear();
             gBoard.setStartPos();
             isPondering = false;
             ponderMove = NULL_MOVE;
         }
         else if (cmd == "setoption") {
+            stopSearch();
             std::string name, val;
             ss >> name; // "name"
             ss >> name; // actual name
@@ -261,15 +284,15 @@ void uciLoop() {
             }
         }
         else if (cmd == "position") {
+            stopSearch();
             parsePosition(line);
         }
         else if (cmd == "go") {
             parseGo(line);
         }
         else if (cmd == "stop") {
-            Engine.stop = true;
             isPondering = false;
-            if (searchThread.joinable()) searchThread.join();
+            stopSearch();
         }
         else if (cmd == "ponderhit") {
             if (isPondering) {
@@ -281,8 +304,8 @@ void uciLoop() {
             }
         }
         else if (cmd == "quit") {
-            Engine.stop = true;
-            if (searchThread.joinable()) searchThread.join();
+            isPondering = false;
+            stopSearch();
             break;
         }
         else if (cmd == "perft") {
