@@ -116,7 +116,6 @@ def make_opening(args: argparse.Namespace, rng: random.Random) -> chess.Board:
 def configure_engine(engine: chess.engine.SimpleEngine, hash_mb: int) -> None:
     supported: dict[str, Any] = {}
     for option, value in (
-        ("Ponder", False),
         ("UseBook", False),
         ("OwnBook", False),
         ("Hash", hash_mb),
