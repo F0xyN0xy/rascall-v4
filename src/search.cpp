@@ -19,24 +19,33 @@ static const int REVERSE_FUTILITY_MARGIN[4] = { 0, 100, 200, 350 };
 static const int RAZOR_MARGIN = 400;
 
 // ── Time management ───────────────────────────────────────────────────────────
+static int64_t steadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+int Searcher::elapsedMs() const {
+    const int64_t start = startTimeNs_.load(std::memory_order_relaxed);
+    if (start == 0) return 0;
+    return static_cast<int>((steadyNowNs() - start) / 1'000'000);
+}
+
 bool Searcher::timeUp() const {
-    if (timeLimit_ <= 0) return false;
-    auto now = std::chrono::steady_clock::now();
-    int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    return elapsed >= timeLimit_;
+    const int limit = timeLimit_.load(std::memory_order_relaxed);
+    return limit > 0 && elapsedMs() >= limit;
 }
 
 bool Searcher::shouldStopEarly() const {
-    if (softLimit_ <= 0) return false;
-    auto now = std::chrono::steady_clock::now();
-    int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    return elapsed >= softLimit_;
+    const int limit = softLimit_.load(std::memory_order_relaxed);
+    return limit > 0 && elapsedMs() >= limit;
 }
 
 void Searcher::setTimeLimits(int softMs, int hardMs) {
-    softLimit_ = softMs;
-    timeLimit_ = hardMs;
-    startTime_ = std::chrono::steady_clock::now();
+    // Called by the UCI thread on ponderhit while the search thread is active.
+    // Atomics avoid racing with the search's time checks.
+    startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
+    softLimit_.store(std::max(0, softMs), std::memory_order_relaxed);
+    timeLimit_.store(std::max(0, hardMs), std::memory_order_relaxed);
 }
 
 // ── Move ordering ────────────────────────────────────────────────────────────
@@ -64,35 +73,47 @@ static void orderMovesWithBoard(const Board& b, MoveList& ml, Move ttMove, Move 
 }
 
 // ── Quiescence search ─────────────────────────────────────────────────────────
-int Searcher::quiesce(Board& b, int alpha, int beta) {
+int Searcher::quiesce(Board& b, int alpha, int beta, int ply) {
     if (stop || timeUp()) return 0;
+    if (ply >= MAX_PLY - 1) return evaluate(b);
 
-    // Check time every 1024 nodes
     if ((nodes_ & 1023) == 0 && timeUp()) {
         stop = true;
         return 0;
     }
-
     nodes_++;
 
-    int stand_pat = evaluate(b);
-    if (stand_pat >= beta) return beta;
-    if (stand_pat > alpha) alpha = stand_pat;
+    const bool inCheck = b.inCheck();
+    if (!inCheck) {
+        int standPat = evaluate(b);
+        if (standPat >= beta) return beta;
+        if (standPat > alpha) alpha = standPat;
+    }
 
+    // A checked side cannot stand pat: it must search every legal evasion,
+    // including quiet king moves and blocks, not just captures.
     MoveList ml;
-    generateCaptures(b, ml);
+    if (inCheck) generateMoves(b, ml);
+    else generateCaptures(b, ml);
 
+    int legalMoves = 0;
     for (int i = 0; i < ml.count; i++) {
         Move m = ml.moves[i];
         b.makeMove(m);
         if (b.isAttacked(b.kingSquare(~b.sideToMove), b.sideToMove)) {
-            b.unmakeMove(); continue;
+            b.unmakeMove();
+            continue;
         }
-        int score = -quiesce(b, -beta, -alpha);
+        legalMoves++;
+
+        int score = -quiesce(b, -beta, -alpha, ply + 1);
         b.unmakeMove();
+
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
     }
+
+    if (inCheck && legalMoves == 0) return -MATE_SCORE + ply;
     return alpha;
 }
 
@@ -119,7 +140,7 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
         }
     }
 
-    if (depth <= 0) return quiesce(b, alpha, beta);
+    if (depth <= 0) return quiesce(b, alpha, beta, ply);
 
     bool inCheck = b.inCheck();
     if (inCheck) depth++;
@@ -295,9 +316,9 @@ int Searcher::aspirationWindow(Board& b, int prevScore, int depth) {
 
 // ── Root search with iterative deepening ──────────────────────────────────────
 SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
-    startTime_ = std::chrono::steady_clock::now();
-    timeLimit_ = lim.movetime;
-    softLimit_ = lim.softTime;
+    startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
+    timeLimit_.store(lim.movetime, std::memory_order_relaxed);
+    softLimit_.store(lim.softTime, std::memory_order_relaxed);
     nodes_     = 0;
     // The caller owns the stop flag so an immediate UCI stop cannot be lost.
     std::memset(killers_, 0, sizeof(killers_));
@@ -349,7 +370,7 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         result.mateIn   = bestMateIn;
 
         auto now = std::chrono::steady_clock::now();
-        int ms   = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
+        int ms   = elapsedMs();
         int nps  = (ms > 0) ? (int)(nodes_ / ms * 1000) : 0;
         result.timeMs = ms;
 
