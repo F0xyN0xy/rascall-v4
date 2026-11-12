@@ -346,7 +346,7 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
     std::memset(pv_, 0, sizeof(pv_));
-    std::fill(std::begin(pvLen_), std::end(pvLen_), 0);
+    std::fill(pvLen_, pvLen_ + MAX_PLY, 0);
 
     TT.newSearch();
 
