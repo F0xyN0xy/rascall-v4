@@ -10,12 +10,14 @@ EvalWeights EW;
 // ── Phase calculation for tapered eval ───────────────────────────────────────
 // Phase = 24 at start, 0 in pure endgame. Used to blend mg/eg scores.
 static int gamePhase(const Board& b) {
-    int phase = 24;
-    phase -= popcount(b.pieceBB(WHITE, QUEEN) | b.pieceBB(BLACK, QUEEN)) * 4;
-    phase -= popcount(b.pieceBB(WHITE, ROOK)  | b.pieceBB(BLACK, ROOK))  * 2;
-    phase -= popcount(b.pieceBB(WHITE, BISHOP)| b.pieceBB(BLACK, BISHOP));
-    phase -= popcount(b.pieceBB(WHITE, KNIGHT)| b.pieceBB(BLACK, KNIGHT));
-    return std::max(0, phase);
+    // Standard tapered-evaluation phase: 24 in the starting position,
+    // falling toward 0 as queens, rooks, bishops and knights are exchanged.
+    int phase = 0;
+    phase += popcount(b.pieceBB(WHITE, QUEEN) | b.pieceBB(BLACK, QUEEN)) * 4;
+    phase += popcount(b.pieceBB(WHITE, ROOK)  | b.pieceBB(BLACK, ROOK))  * 2;
+    phase += popcount(b.pieceBB(WHITE, BISHOP)| b.pieceBB(BLACK, BISHOP));
+    phase += popcount(b.pieceBB(WHITE, KNIGHT)| b.pieceBB(BLACK, KNIGHT));
+    return std::min(24, phase);
 }
 
 // ── Tapered score: blend middlegame and endgame ──────────────────────────────
