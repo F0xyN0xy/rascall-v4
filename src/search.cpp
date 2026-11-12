@@ -316,9 +316,14 @@ int Searcher::aspirationWindow(Board& b, int prevScore, int depth) {
 
 // ── Root search with iterative deepening ──────────────────────────────────────
 SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
-    startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
-    timeLimit_.store(lim.movetime, std::memory_order_relaxed);
-    softLimit_.store(lim.softTime, std::memory_order_relaxed);
+    // For ponder searches, startSearch() initializes an unlimited timer before
+    // launching this worker. Do not overwrite a ponderhit that may arrive
+    // immediately, even before this thread begins executing.
+    if (!lim.ponder) {
+        startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
+        timeLimit_.store(lim.movetime, std::memory_order_relaxed);
+        softLimit_.store(lim.softTime, std::memory_order_relaxed);
+    }
     nodes_     = 0;
     // The caller owns the stop flag so an immediate UCI stop cannot be lost.
     std::memset(killers_, 0, sizeof(killers_));
