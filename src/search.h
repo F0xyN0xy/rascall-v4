@@ -18,6 +18,7 @@ struct SearchLimits {
 
 struct SearchResult {
     Move bestMove  = NULL_MOVE;
+    Move ponderMove = NULL_MOVE; // Second move in the completed principal variation
     int  score     = 0;
     int  depth     = 0;
     uint64_t nodes = 0;
