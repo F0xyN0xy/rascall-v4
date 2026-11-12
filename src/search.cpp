@@ -299,7 +299,7 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
     timeLimit_ = lim.movetime;
     softLimit_ = lim.softTime;
     nodes_     = 0;
-    stop       = false;
+    // The caller owns the stop flag so an immediate UCI stop cannot be lost.
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
 
