@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import sys
 import time
@@ -25,9 +26,7 @@ except ImportError:
     )
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_STOCKFISH = Path(
-    __import__("os").environ.get("STOCKFISH_PATH", "")
-).expanduser() if __import__("os").environ.get("STOCKFISH_PATH") else None
+DEFAULT_STOCKFISH = Path(os.environ["STOCKFISH_PATH"]).expanduser() if os.environ.get("STOCKFISH_PATH") else None
 DEFAULT_V4_CANDIDATES = (
     ROOT / "build" / "Release" / "rascall-v4.exe",
     ROOT / "build" / "rascall-v4.exe",
