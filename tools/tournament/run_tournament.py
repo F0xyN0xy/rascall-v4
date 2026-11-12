@@ -11,6 +11,7 @@ import random
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -126,7 +127,7 @@ def configure_engine(engine: chess.engine.SimpleEngine, hash_mb: int) -> None:
         engine.configure(supported)
 
 
-def score_text(info: dict[str, Any], pov: chess.Color) -> str:
+def score_text(info: Mapping[str, Any], pov: chess.Color) -> str:
     score = info.get("score")
     if score is None:
         return "unknown"
@@ -138,7 +139,7 @@ def score_text(info: dict[str, Any], pov: chess.Color) -> str:
     return f"{cp / 100:+.2f}" if cp is not None else "unknown"
 
 
-def pv_text(info: dict[str, Any]) -> str:
+def pv_text(info: Mapping[str, Any]) -> str:
     pv = info.get("pv", [])
     return " ".join(move.uci() for move in pv[:12])
 
@@ -245,7 +246,8 @@ def play_game(
 
     if board.is_game_over(claim_draw=True):
         game.headers["Result"] = board.result(claim_draw=True)
-        game.headers["Termination"] = board.outcome(claim_draw=True).termination.name
+        outcome = board.outcome(claim_draw=True)
+        game.headers["Termination"] = outcome.termination.name if outcome else "unknown"
     else:
         game.headers["Result"] = "1/2-1/2"
         game.headers["Termination"] = f"move-limit-{args.max_plies}"
@@ -299,10 +301,16 @@ def main() -> int:
         return 0
 
     if len(engines) < 2:
-        parser.error(
-            "At least two engines are required. Build Rascall V4 and provide Stockfish "
-            "or add other versions with --engine NAME=PATH."
-        )
+        print("Detected engines:")
+        if engines:
+            for name, path in engines.items():
+                print(f"  {name}: {path}")
+        else:
+            print("  None")
+        print("\nRascall V4 was not found in the default build locations, and Stockfish was not found.")
+        print("Set STOCKFISH_PATH in this PowerShell session and pass --engine for any executable")
+        print("whose location differs from the runner's defaults. Use --list-engines to diagnose.")
+        return 2
     missing = [(name, path) for name, path in engines.items() if not path.is_file()]
     if missing:
         for name, path in missing:
