@@ -19,24 +19,33 @@ static const int REVERSE_FUTILITY_MARGIN[4] = { 0, 100, 200, 350 };
 static const int RAZOR_MARGIN = 400;
 
 // ── Time management ───────────────────────────────────────────────────────────
+static int64_t steadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+int Searcher::elapsedMs() const {
+    const int64_t start = startTimeNs_.load(std::memory_order_relaxed);
+    if (start == 0) return 0;
+    return static_cast<int>((steadyNowNs() - start) / 1'000'000);
+}
+
 bool Searcher::timeUp() const {
-    if (timeLimit_ <= 0) return false;
-    auto now = std::chrono::steady_clock::now();
-    int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    return elapsed >= timeLimit_;
+    const int limit = timeLimit_.load(std::memory_order_relaxed);
+    return limit > 0 && elapsedMs() >= limit;
 }
 
 bool Searcher::shouldStopEarly() const {
-    if (softLimit_ <= 0) return false;
-    auto now = std::chrono::steady_clock::now();
-    int elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
-    return elapsed >= softLimit_;
+    const int limit = softLimit_.load(std::memory_order_relaxed);
+    return limit > 0 && elapsedMs() >= limit;
 }
 
 void Searcher::setTimeLimits(int softMs, int hardMs) {
-    softLimit_ = softMs;
-    timeLimit_ = hardMs;
-    startTime_ = std::chrono::steady_clock::now();
+    // Called by the UCI thread on ponderhit while the search thread is active.
+    // Atomics avoid racing with the search's time checks.
+    startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
+    softLimit_.store(std::max(0, softMs), std::memory_order_relaxed);
+    timeLimit_.store(std::max(0, hardMs), std::memory_order_relaxed);
 }
 
 // ── Move ordering ────────────────────────────────────────────────────────────
@@ -64,35 +73,47 @@ static void orderMovesWithBoard(const Board& b, MoveList& ml, Move ttMove, Move 
 }
 
 // ── Quiescence search ─────────────────────────────────────────────────────────
-int Searcher::quiesce(Board& b, int alpha, int beta) {
+int Searcher::quiesce(Board& b, int alpha, int beta, int ply) {
     if (stop || timeUp()) return 0;
+    if (ply >= MAX_PLY - 1) return evaluate(b);
 
-    // Check time every 1024 nodes
     if ((nodes_ & 1023) == 0 && timeUp()) {
         stop = true;
         return 0;
     }
-
     nodes_++;
 
-    int stand_pat = evaluate(b);
-    if (stand_pat >= beta) return beta;
-    if (stand_pat > alpha) alpha = stand_pat;
+    const bool inCheck = b.inCheck();
+    if (!inCheck) {
+        int standPat = evaluate(b);
+        if (standPat >= beta) return beta;
+        if (standPat > alpha) alpha = standPat;
+    }
 
+    // A checked side cannot stand pat: it must search every legal evasion,
+    // including quiet king moves and blocks, not just captures.
     MoveList ml;
-    generateCaptures(b, ml);
+    if (inCheck) generateMoves(b, ml);
+    else generateCaptures(b, ml);
 
+    int legalMoves = 0;
     for (int i = 0; i < ml.count; i++) {
         Move m = ml.moves[i];
         b.makeMove(m);
         if (b.isAttacked(b.kingSquare(~b.sideToMove), b.sideToMove)) {
-            b.unmakeMove(); continue;
+            b.unmakeMove();
+            continue;
         }
-        int score = -quiesce(b, -beta, -alpha);
+        legalMoves++;
+
+        int score = -quiesce(b, -beta, -alpha, ply + 1);
         b.unmakeMove();
+
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
     }
+
+    if (inCheck && legalMoves == 0) return -MATE_SCORE + ply;
     return alpha;
 }
 
@@ -105,6 +126,10 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
     }
     if (stop) return 0;
     nodes_++;
+
+    // Start this node's PV as empty. A TT cutoff may leave it empty;
+    // a searched alpha-improving move will populate it below.
+    if (ply < MAX_PLY) pvLen_[ply] = ply;
 
     // Mate distance pruning
     int mateAlpha = std::max(alpha, -MATE_SCORE + ply);
@@ -119,7 +144,7 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
         }
     }
 
-    if (depth <= 0) return quiesce(b, alpha, beta);
+    if (depth <= 0) return quiesce(b, alpha, beta, ply);
 
     bool inCheck = b.inCheck();
     if (inCheck) depth++;
@@ -139,7 +164,7 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
     if (!inCheck && ply > 0 && depth == 3) {
         int staticEval = evaluate(b);
         if (staticEval + RAZOR_MARGIN < alpha) {
-            return quiesce(b, alpha, beta);
+            return quiesce(b, alpha, beta, ply);
         }
     }
 
@@ -232,6 +257,19 @@ int Searcher::alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool 
         if (score > alpha) {
             alpha = score;
             flag  = TT_EXACT;
+
+            // Preserve the actual searched principal variation instead of
+            // reconstructing it from TT entries that can be overwritten.
+            if (ply < MAX_PLY - 1) {
+                pv_[ply][ply] = m;
+                const int childPvEnd = std::min(pvLen_[ply + 1], MAX_PLY);
+                for (int j = ply + 1; j < childPvEnd; ++j)
+                    pv_[ply][j] = pv_[ply + 1][j];
+                pvLen_[ply] = std::max(ply + 1, childPvEnd);
+            } else {
+                pv_[ply][ply] = m;
+                pvLen_[ply] = ply + 1;
+            }
             if (!isCapture(m)) {
                 history_[fromSq(m)][toSq(m)] += depth * depth;
                 if (history_[fromSq(m)][toSq(m)] > 1'000'000)
@@ -295,13 +333,20 @@ int Searcher::aspirationWindow(Board& b, int prevScore, int depth) {
 
 // ── Root search with iterative deepening ──────────────────────────────────────
 SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
-    startTime_ = std::chrono::steady_clock::now();
-    timeLimit_ = lim.movetime;
-    softLimit_ = lim.softTime;
+    // For ponder searches, startSearch() initializes an unlimited timer before
+    // launching this worker. Do not overwrite a ponderhit that may arrive
+    // immediately, even before this thread begins executing.
+    if (!lim.ponder) {
+        startTimeNs_.store(steadyNowNs(), std::memory_order_relaxed);
+        timeLimit_.store(lim.movetime, std::memory_order_relaxed);
+        softLimit_.store(lim.softTime, std::memory_order_relaxed);
+    }
     nodes_     = 0;
-    stop       = false;
+    // The caller owns the stop flag so an immediate UCI stop cannot be lost.
     std::memset(killers_, 0, sizeof(killers_));
     std::memset(history_, 0, sizeof(history_));
+    std::memset(pv_, 0, sizeof(pv_));
+    std::fill(pvLen_, pvLen_ + MAX_PLY, 0);
 
     TT.newSearch();
 
@@ -336,11 +381,14 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
 
         prevScore = score;
 
-        TTEntry* tte = TT.probe(b.hash);
-        if (tte && tte->move != NULL_MOVE) {
-            bestMove = tte->move;
-            bestMateIn = tte->mateIn;
+        // The root PV is authoritative for the completed iteration. It is
+        // built during alpha-beta and does not depend on TT chain stability.
+        if (pvLen_[0] > 0 && pv_[0][0] != NULL_MOVE) {
+            bestMove = pv_[0][0];
+            result.ponderMove = pvLen_[0] > 1 ? pv_[0][1] : NULL_MOVE;
         }
+        TTEntry* tte = TT.probe(b.hash);
+        if (tte) bestMateIn = tte->mateIn;
 
         result.bestMove = bestMove;
         result.score    = score;
@@ -349,7 +397,7 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         result.mateIn   = bestMateIn;
 
         auto now = std::chrono::steady_clock::now();
-        int ms   = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime_).count();
+        int ms   = elapsedMs();
         int nps  = (ms > 0) ? (int)(nodes_ / ms * 1000) : 0;
         result.timeMs = ms;
 
@@ -367,25 +415,12 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         infoLine += " time " + std::to_string(ms);
         infoLine += " hashfull " + std::to_string(TT.hashfull());
 
-        // Build PV from TT
+        // Emit the PV captured directly from the completed alpha-beta search.
         infoLine += " pv";
-        Board pvBoard = b;
-        Move pvMove = bestMove;
-        int pvLen = 0;
-        U64 pvHashes[32] = {};
-        while (pvMove != NULL_MOVE && pvLen < 12) {
-            bool repeat = false;
-            for (int i = 0; i < pvLen; i++) {
-                if (pvHashes[i] == pvBoard.hash) { repeat = true; break; }
-            }
-            if (repeat) break;
-            pvHashes[pvLen] = pvBoard.hash;
-
-            infoLine += " " + moveToStr(pvMove);
-            pvBoard.makeMove(pvMove);
-            TTEntry* pvTte = TT.probe(pvBoard.hash);
-            pvMove = (pvTte && pvTte->move != NULL_MOVE) ? pvTte->move : NULL_MOVE;
-            pvLen++;
+        const int rootPvLen = std::min(pvLen_[0], 32);
+        for (int i = 0; i < rootPvLen; ++i) {
+            if (pv_[0][i] == NULL_MOVE) break;
+            infoLine += " " + moveToStr(pv_[0][i]);
         }
 
         std::cout << infoLine << std::endl;

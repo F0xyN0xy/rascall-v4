@@ -200,6 +200,7 @@ static void workerThread(int threadId, const GensfenOptions& opts,
             lim.softTime = 0;
             lim.useBook = false;
             
+            Engine.stop = false;
             SearchResult sr = Engine.search(board, lim);
             int eval = sr.score;
             Move bestMove = sr.bestMove;
