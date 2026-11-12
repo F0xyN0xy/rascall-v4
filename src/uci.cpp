@@ -181,7 +181,13 @@ static void startSearch(const SearchLimits& lim) {
         if (bestMove == NULL_MOVE) {
             std::cout << "bestmove 0000" << std::endl;
         } else {
-            Move reply = findPonderReply(searchBoard, bestMove);
+            Move reply = result.ponderMove;
+            if (reply == NULL_MOVE) reply = findPonderReply(searchBoard, bestMove);
+            else {
+                Board afterBest = searchBoard;
+                afterBest.makeMove(bestMove);
+                if (!isLegalMove(afterBest, reply)) reply = NULL_MOVE;
+            }
             std::cout << "bestmove " << moveToStr(bestMove);
             if (reply != NULL_MOVE) std::cout << " ponder " << moveToStr(reply);
             std::cout << std::endl;
