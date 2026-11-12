@@ -1,0 +1,47 @@
+# CMake / generated build directories
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/Debug/
+/Release/
+/x64/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Compiled binaries and intermediate files
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+*.ilk
+*.pch
+*.gch
+
+# Local engine assets / runtime output
+/book.bin
+*.log
+*.tmp
+*.bak
+core
+core.*
+
+# IDE and editor files
+.vs/
+.idea/
+*.suo
+*.user
+*.vcxproj.user
+*.sln.docstates
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini
