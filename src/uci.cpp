@@ -10,10 +10,12 @@
 // ── Global state ──────────────────────────────────────────────────────────────
 static Board gBoard;
 static std::thread searchThread;
-static Move ponderMove = NULL_MOVE;
 static bool isPondering = false;
+static int ponderSoftTime = 0;
+static int ponderHardTime = 0;
 static SearchLimits currentLimits;
-static bool useBook = true;  // ← ADDED: track book setting
+static bool useBook = true;
+static bool usePonder = true;
 
 // ── Parse position ────────────────────────────────────────────────────────────
 static void parsePosition(const std::string& line) {
@@ -118,17 +120,44 @@ static void stopSearch() {
     }
 }
 
+static bool isLegalMove(Board& board, Move move) {
+    MoveList moves;
+    generateMoves(board, moves);
+    for (int i = 0; i < moves.count; ++i) {
+        if (moves.moves[i] != move) continue;
+        board.makeMove(move);
+        bool legal = !board.isAttacked(board.kingSquare(~board.sideToMove), board.sideToMove);
+        board.unmakeMove();
+        return legal;
+    }
+    return false;
+}
+
 static Move firstLegalMove(Board b) {
     MoveList moves;
     generateMoves(b, moves);
     for (int i = 0; i < moves.count; ++i) {
-        Move move = moves.moves[i];
-        b.makeMove(move);
-        bool legal = !b.isAttacked(b.kingSquare(~b.sideToMove), b.sideToMove);
-        b.unmakeMove();
-        if (legal) return move;
+        if (isLegalMove(b, moves.moves[i])) return moves.moves[i];
     }
     return NULL_MOVE;
+}
+
+// Obtain a legal predicted reply from the transposition table's child position.
+// UCI's "bestmove X ponder Y" means Y is the opponent's predicted response.
+static Move findPonderReply(Board board, Move bestMove) {
+    if (bestMove == NULL_MOVE || !isLegalMove(board, bestMove)) return NULL_MOVE;
+
+    board.makeMove(bestMove);
+    TTEntry* entry = TT.probe(board.hash);
+    if (!entry || entry->move == NULL_MOVE) {
+        board.unmakeMove();
+        return NULL_MOVE;
+    }
+
+    Move reply = entry->move;
+    bool legal = isLegalMove(board, reply);
+    board.unmakeMove();
+    return legal ? reply : NULL_MOVE;
 }
 
 // ── Start search thread ───────────────────────────────────────────────────────
@@ -148,8 +177,14 @@ static void startSearch(const SearchLimits& lim) {
         // UCI still requires a bestmove response, so return a legal fallback.
         if (bestMove == NULL_MOVE) bestMove = firstLegalMove(searchBoard);
 
-        if (bestMove == NULL_MOVE) std::cout << "bestmove 0000" << std::endl;
-        else std::cout << "bestmove " << moveToStr(bestMove) << std::endl;
+        if (bestMove == NULL_MOVE) {
+            std::cout << "bestmove 0000" << std::endl;
+        } else {
+            Move reply = findPonderReply(searchBoard, bestMove);
+            std::cout << "bestmove " << moveToStr(bestMove);
+            if (reply != NULL_MOVE) std::cout << " ponder " << moveToStr(reply);
+            std::cout << std::endl;
+        }
     });
 }
 
@@ -176,6 +211,8 @@ static void parseGo(const std::string& line) {
         if (token == "movestogo") { ss >> movestogo; }
         if (token == "ponder")    { doPonder = true; }
     }
+
+    doPonder = doPonder && usePonder;
 
     // === INSTANT BOOK MOVE — NO SEARCH THREAD AT ALL ===
     if (useBook && !doPonder && !lim.infinite && lim.movetime == 0 && !depthSet) {
@@ -207,16 +244,18 @@ static void parseGo(const std::string& line) {
         isPondering = true;
         lim.ponder = true;
         lim.infinite = true;
+        lim.depth = MAX_PLY;
+
+        // Keep the clock budget calculated from the go command. It starts
+        // counting only when ponderhit arrives, not while the engine thinks.
+        ponderSoftTime = lim.softTime;
+        ponderHardTime = lim.movetime;
         lim.movetime = 0;
         lim.softTime = 0;
-
-        TTEntry* tte = TT.probe(gBoard.hash);
-        if (tte && tte->move != NULL_MOVE) {
-            ponderMove = tte->move;
-        }
     } else {
         isPondering = false;
-        ponderMove = NULL_MOVE;
+        ponderSoftTime = 0;
+        ponderHardTime = 0;
     }
 
     startSearch(lim);
@@ -257,7 +296,8 @@ void uciLoop() {
             TT.clear();
             gBoard.setStartPos();
             isPondering = false;
-            ponderMove = NULL_MOVE;
+            ponderSoftTime = 0;
+            ponderHardTime = 0;
         }
         else if (cmd == "setoption") {
             stopSearch();
@@ -275,8 +315,11 @@ void uciLoop() {
                     Book.initBuiltinRepertoire();
                 }
             }
-            else if (name == "UseBook") {   // ← ADDED
+            else if (name == "UseBook") {
                 useBook = (val == "true");
+            }
+            else if (name == "Ponder") {
+                usePonder = (val == "true");
             }
             else if (name == "Depth") {
                 int d = std::stoi(val);
@@ -297,10 +340,7 @@ void uciLoop() {
         else if (cmd == "ponderhit") {
             if (isPondering) {
                 isPondering = false;
-                int myTime = (gBoard.sideToMove == WHITE) ? 30000 : 30000;
-                int softMs, hardMs;
-                calculateTimeLimits(myTime, 0, 0, softMs, hardMs, gBoard);
-                Engine.setTimeLimits(softMs, hardMs);
+                Engine.setTimeLimits(ponderSoftTime, ponderHardTime);
             }
         }
         else if (cmd == "quit") {
