@@ -178,6 +178,7 @@ GameResult RLTrainer::playGame(EvalWeights& w1, EvalWeights& w2) {
         lim.movetime = 0;  // Fixed depth only, no time management
 
         TT.clear();
+        Engine.stop = false;
         SearchResult sr = Engine.search(b, lim);
         EW = savedEW;
 
