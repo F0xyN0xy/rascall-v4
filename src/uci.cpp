@@ -1,6 +1,8 @@
 #include "uci.h"
 #include "movegen.h"
 #include "gensfen.h"
+#include <algorithm>
+#include <string>
 #include <iostream>
 #include <sstream>
 #include <thread>
