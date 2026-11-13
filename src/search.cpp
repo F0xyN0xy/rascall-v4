@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 
 Searcher Engine;
 
@@ -354,6 +355,11 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
     Move bestMove = NULL_MOVE;
     int bestMateIn = 0;
     int prevScore = 0;
+    const int baseSoftLimit = lim.softTime;
+    const int hardLimit = lim.movetime;
+    Move previousBestMove = NULL_MOVE;
+    int previousCompletedScore = 0;
+    int stableBestMoveIterations = 0;
 
     for (int depth = 1; depth <= lim.depth; depth++) {
         // Check soft limit BEFORE starting new depth
@@ -375,9 +381,9 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
             score = alphaBeta(b, -INF, INF, depth, 0, false);
         }
 
-        if (stop || timeUp()) {
-            if (bestMove != NULL_MOVE) break;
-        }
+        // Do not publish a partially completed iteration as the new result.
+        // Keep the best move from the last fully completed iteration instead.
+        if (stop || timeUp()) break;
 
         prevScore = score;
 
@@ -400,6 +406,29 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
         int ms   = elapsedMs();
         int nps  = (ms > 0) ? (int)(nodes_ / ms * 1000) : 0;
         result.timeMs = ms;
+
+        // Adapt the soft target using completed-iteration stability. A stable
+        // root move can finish sooner; score swings or repeated move changes
+        // can use more of the reserved hard budget.
+        if (baseSoftLimit > 0 && hardLimit > 0) {
+            if (bestMove == previousBestMove && bestMove != NULL_MOVE)
+                stableBestMoveIterations++;
+            else
+                stableBestMoveIterations = 0;
+
+            const int scoreSwing = std::abs(score - previousCompletedScore);
+            double factor = 1.0;
+            factor -= std::min(0.30, stableBestMoveIterations * 0.075);
+            if (scoreSwing > 60)
+                factor += std::min(0.40, double(scoreSwing - 60) / 250.0);
+            factor = std::clamp(factor, 0.70, 1.40);
+
+            const int adjustedSoft = std::min(
+                hardLimit, std::max(1, int(baseSoftLimit * factor)));
+            softLimit_.store(adjustedSoft, std::memory_order_relaxed);
+            previousBestMove = bestMove;
+            previousCompletedScore = score;
+        }
 
         // === BUILD INFO LINE AS SINGLE STRING ===
         std::string infoLine = "info depth " + std::to_string(depth);
