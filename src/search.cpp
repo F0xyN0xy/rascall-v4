@@ -381,9 +381,9 @@ SearchResult Searcher::search(Board& b, const SearchLimits& lim) {
             score = alphaBeta(b, -INF, INF, depth, 0, false);
         }
 
-        if (stop || timeUp()) {
-            if (bestMove != NULL_MOVE) break;
-        }
+        // Do not publish a partially completed iteration as the new result.
+        // Keep the best move from the last fully completed iteration instead.
+        if (stop || timeUp()) break;
 
         prevScore = score;
 
