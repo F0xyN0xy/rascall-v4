@@ -58,58 +58,59 @@ static int estimateComplexityFast(const Board& b) {
     return complexity;
 }
 
-// ── Calculate time allocation ─────────────────────────────────────────────────
-static void calculateTimeLimits(int myTime, int myInc, int movestogo, 
+// ── Calculate adaptive time allocation ──────────────────────────────────────
+static void calculateTimeLimits(int myTime, int myInc, int movestogo,
                                 int& softMs, int& hardMs, const Board& b) {
-    if (myTime <= 0) {
-        softMs = hardMs = 0;
-        return;
-    }
+    softMs = hardMs = 0;
+    if (myTime <= 0) return;
 
-    int phase = estimateGamePhaseFast(b);
-    int complexity = estimateComplexityFast(b);
+    // Keep a small reserve for GUI/UCI overhead and the final bestmove response.
+    const int overhead = std::min(100, std::max(20, myTime / 100));
+    const int usable = std::max(1, myTime - overhead);
 
-    // MUCH more conservative factors
-    float baseFactor;
-    if (phase > 24)       baseFactor = 0.008f;   // Opening: 0.8%
-    else if (phase > 12)  baseFactor = 0.015f;   // Middlegame: 1.5%
-    else if (phase > 6)   baseFactor = 0.025f;   // Endgame: 2.5%
-    else                  baseFactor = 0.040f;   // Late endgame: 4%
+    const int phase = estimateGamePhaseFast(b);
+    const int complexity = estimateComplexityFast(b);
 
-    if (movestogo > 0 && movestogo < 10) {
-        baseFactor *= 0.7f;
-    }
+    // Prefer the GUI's explicit moves-to-go. Otherwise use a conservative
+    // estimate that becomes more cautious as the remaining clock gets shorter.
+    int expectedMoves = movestogo > 0
+        ? std::clamp(movestogo, 1, 80)
+        : (myTime < 30'000 ? 42 : myTime < 120'000 ? 38 :
+           myTime < 600'000 ? 42 : 48);
 
-    float complexityMult = 1.0f;
-    if (complexity > 50)      complexityMult = 1.2f;
-    else if (complexity > 30) complexityMult = 1.1f;
-    else if (complexity < 15) complexityMult = 0.8f;
+    // Fewer pieces usually means more precise endgame decisions and fewer
+    // remaining moves; opening positions should preserve time for later.
+    if (phase > 24) expectedMoves += 5;
+    else if (phase <= 6) expectedMoves = std::max(18, expectedMoves - 7);
+    else if (phase <= 12) expectedMoves = std::max(22, expectedMoves - 3);
 
-    float incBonus = myInc * 0.4f;
+    double complexityFactor = 1.0;
+    if (b.inCheck()) complexityFactor += 0.20;
+    if (complexity >= 55) complexityFactor += 0.15;
+    else if (complexity >= 40) complexityFactor += 0.08;
+    else if (complexity < 18) complexityFactor -= 0.12;
+    complexityFactor = std::clamp(complexityFactor, 0.80, 1.35);
 
-    softMs = int(myTime * baseFactor * complexityMult + incBonus);
-    hardMs = int(myTime * baseFactor * complexityMult * 1.8f + incBonus);
+    const double incrementContribution = std::min(
+        double(myInc) * 0.80, double(usable) * 0.04);
+    double optimum = (double(usable) / expectedMoves + incrementContribution)
+                   * complexityFactor;
 
-    // ABSOLUTE CAPS
-    int maxTime = myTime / 15;
-    int maxSoft = myTime / 25;
+    // Avoid spending a dangerous fraction of the clock on one move.
+    const double softFractionCap = myTime <= 120'000 ? 0.06 : 0.08;
+    const double hardFractionCap = myTime <= 120'000 ? 0.12 : 0.18;
+    const int softCap = std::max(1, int(usable * softFractionCap));
+    const int hardCap = std::max(softCap, int(usable * hardFractionCap));
 
-    if (phase > 24) {
-        maxTime = std::min(maxTime, 2000);   // Max 2s in opening
-        maxSoft = std::min(maxSoft, 1200);   // Soft: 1.2s
-    }
+    softMs = std::clamp(int(optimum), 1, softCap);
+    const double hardMultiplier = myTime <= 30'000 ? 2.4 : 3.0;
+    hardMs = std::clamp(int(std::max(optimum * hardMultiplier,
+                                     optimum + std::min(250.0, double(myInc)))),
+                        softMs, hardCap);
 
-    hardMs = std::min(hardMs, maxTime);
-    softMs = std::min(softMs, maxSoft);
-
-    hardMs = std::max(hardMs, softMs + 100);
-
-    if (softMs < 50) softMs = 50;
-    if (hardMs < 100) hardMs = 100;
-
-    int overhead = 100;
-    hardMs = std::max(50, hardMs - overhead);
-    softMs = std::max(50, softMs - overhead);
+    // With a very low clock, never let the target exceed the usable time.
+    softMs = std::min(softMs, usable);
+    hardMs = std::min(std::max(hardMs, softMs), usable);
 }
 
 // ── Search lifecycle and legal fallback ───────────────────────────────────────
