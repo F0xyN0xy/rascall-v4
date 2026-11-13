@@ -75,13 +75,12 @@ static void orderMovesWithBoard(const Board& b, MoveList& ml, Move ttMove, Move 
 
 // ── Quiescence search ─────────────────────────────────────────────────────────
 int Searcher::quiesce(Board& b, int alpha, int beta, int ply) {
-    if (stop || timeUp()) return 0;
-    if (ply >= MAX_PLY - 1) return evaluate(b);
-
-    if ((nodes_ & 1023) == 0 && timeUp()) {
+    if (stop) return 0;
+    if (timeUp()) {
         stop = true;
         return 0;
     }
+    if (ply >= MAX_PLY - 1) return evaluate(b);
     nodes_++;
 
     const bool inCheck = b.inCheck();
