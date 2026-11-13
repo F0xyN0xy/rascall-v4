@@ -246,6 +246,14 @@ static void parseGo(const std::string& line) {
             calculateTimeLimits(myTime, myInc, movestogo, softMs, hardMs, gBoard);
             lim.softTime = softMs;
             lim.movetime = hardMs;
+
+            // Diagnostics go to stderr so they never interfere with UCI stdout.
+            std::cerr << "[TimeManager] clock=" << myTime
+                      << " increment=" << myInc
+                      << " movesToGo=" << movestogo
+                      << " soft=" << softMs
+                      << " hard=" << hardMs
+                      << '\n';
         }
     }
 
