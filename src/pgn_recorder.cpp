@@ -89,7 +89,6 @@ void PgnRecorder::append(const Board& before, Move move) {
     if (move == NULL_MOVE || !legalMove(const_cast<Board&>(before), move)) return;
     Board copy = before;
     sanMoves_.push_back(sanFor(copy, move));
-    saveActive();
 }
 
 void PgnRecorder::setResult(const std::string& result) {
