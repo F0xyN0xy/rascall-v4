@@ -30,19 +30,40 @@ Install the Python dependency:
 py -m pip install -r tools/analysis/requirements.txt
 ```
 
-Analyse all raw PGNs:
+Analyse all raw PGNs (adjust the path if your engine's working directory puts
+the archive under `build/games/raw`):
 
 ```powershell
-py tools/analysis/analyse_pgn.py .\games\raw `
-  --stockfish "$HOME\Documents\stockfish\stockfish-windows-x86-64-universal.exe" `
-  --depth 12
+py tools/analysis/analyse_pgn.py .\\build\\games\\raw `
+  --stockfish "$HOME\\Documents\\stockfish\\stockfish-windows-x86-64-universal.exe" `
+  --depth 12 `
+  --output-dir .\\build\\games\\analysed
 ```
 
 Or analyse one PGN by passing its path instead of the directory. The script
-writes annotated PGNs and a JSON report to `games/analysed/`. It flags moves
-whose estimated loss is at least 100 centipawns by default. This is a diagnostic
-signal, not a perfect classification: results depend on Stockfish depth, time,
-hardware and position complexity.
+writes annotated PGNs and a JSON report to the selected output directory. It
+flags moves whose estimated loss is at least 100 centipawns by default.
+
+### How move loss is calculated
+
+For each position, the script asks Stockfish for its unrestricted best move and
+score, then searches again from the **same pre-move position** with the played
+move as the only allowed root move. Both scores are expressed from the mover's
+perspective. Centipawn loss is the difference between those two root scores,
+clamped at zero. This avoids comparing an evaluation before the move against
+one from a different position and removes the sign/perspective ambiguity in the
+older calculation.
+
+Mate scores are represented separately as mate distances, not converted into
+large made-up centipawn values. A forced-mate outcome that changes from a
+winning mate for the mover to no win (or a forced loss) is reported as a
+`mate_regression`; mate positions are not assigned a centipawn loss.
+
+The comparison is still a depth-limited estimate. Results can change with
+Stockfish version, depth, hash size, hardware and position complexity. The
+played-move search adds work, so analysis takes longer than the earlier
+before/after-position method. Increase depth for critical positions and verify
+important examples before using them as training labels.
 
 ## Notes and limitations
 
