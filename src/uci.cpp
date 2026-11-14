@@ -1,6 +1,7 @@
 #include "uci.h"
 #include "movegen.h"
 #include "gensfen.h"
+#include "pgn_recorder.h"
 #include <algorithm>
 #include <string>
 #include <iostream>
@@ -26,20 +27,27 @@ static void parsePosition(const std::string& line) {
     ss >> token; // "position"
 
     ss >> token;
+    std::string recordingStartFen;
     if (token == "startpos") {
         gBoard.setStartPos();
+        recordingStartFen = gBoard.getFEN();
         ss >> token; // might be "moves"
     } else if (token == "fen") {
         std::string fen;
         while (ss >> token && token != "moves")
             fen += token + " ";
         gBoard.setFEN(fen);
+        recordingStartFen = gBoard.getFEN();
     }
 
+    GameRecorder.reset(recordingStartFen.empty() ? gBoard.getFEN() : recordingStartFen);
     while (ss >> token) {
         if (token == "moves") continue;
         Move m = strToMove(gBoard, token);
-        if (m != NULL_MOVE) gBoard.makeMove(m);
+        if (m != NULL_MOVE) {
+            GameRecorder.append(gBoard, m);
+            gBoard.makeMove(m);
+        }
     }
 }
 
@@ -310,6 +318,7 @@ void uciLoop() {
         }
         else if (cmd == "ucinewgame") {
             stopSearch();
+            GameRecorder.finish();
             TT.clear();
             gBoard.setStartPos();
             isPondering = false;
@@ -360,9 +369,15 @@ void uciLoop() {
                 Engine.setTimeLimits(ponderSoftTime, ponderHardTime);
             }
         }
+        else if (cmd == "game_result") {
+            std::string result;
+            ss >> result;
+            GameRecorder.setResult(result);
+        }
         else if (cmd == "quit") {
             isPondering = false;
             stopSearch();
+            GameRecorder.finish();
             break;
         }
         else if (cmd == "perft") {
