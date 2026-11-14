@@ -19,6 +19,7 @@ set(SOURCES
     src/eval.cpp
     src/search.cpp
     src/uci.cpp
+    src/pgn_recorder.cpp
     src/rl.cpp
     src/book.cpp
     src/gensfen.cpp
