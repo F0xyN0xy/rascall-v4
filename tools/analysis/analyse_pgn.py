@@ -44,6 +44,9 @@ def analyse_game(
         before_info = engine.analyse(source_board, limit)
         best_pv = before_info.get("pv", [])
         best_move = best_pv[0] if best_pv else None
+        best_text = source_board.san(best_move) if best_move and best_move in source_board.legal_moves else (
+            best_move.uci() if best_move else "unavailable"
+        )
         before_score = score_cp(before_info, mover)
 
         source_board.push(move)
@@ -56,9 +59,6 @@ def analyse_game(
         )
 
         node = annotated.end().add_variation(move)
-        best_text = source_board.san(best_move) if best_move and best_move in source_board.legal_moves else (
-            best_move.uci() if best_move else "unavailable"
-        )
         node.comment = (
             f"Stockfish best before move: {best_text}; "
             f"eval after move (mover POV): {after_score}; "
