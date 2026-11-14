@@ -49,6 +49,7 @@ static void parsePosition(const std::string& line) {
             gBoard.makeMove(m);
         }
     }
+    GameRecorder.saveActive();
 }
 
 // ── FAST game phase estimate (no movegen!) ────────────────────────────────────
