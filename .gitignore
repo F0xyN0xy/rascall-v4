@@ -49,3 +49,4 @@ desktop.ini
 # Local tournament configuration and generated match data
 /tournament-results/
 /tools/tournament/engines.local.json
+/games/
