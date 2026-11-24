@@ -1,18 +1,90 @@
+
 #pragma once
 #include "types.h"
 
-// ── Bit helpers ───────────────────────────────────────────────────────────────
-inline int  popcount(U64 b)       { return __builtin_popcountll(b); }
-inline int  lsb(U64 b)           { return __builtin_ctzll(b); }
-inline int  msb(U64 b)           { return 63 ^ __builtin_clzll(b); }
-inline U64  popLSB(U64& b)       { U64 t = b & -b; b &= b-1; return t; }
-inline U64  bit(int sq)          { return 1ULL << sq; }
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
+// ── Bit helpers ──────────────────────────────────────────────
+
+inline int popcount(U64 b) {
+#if defined(_MSC_VER)
+    // Portable software implementation for MSVC.
+    b = b - ((b >> 1) & 0x5555555555555555ULL);
+    b = (b & 0x3333333333333333ULL) +
+        ((b >> 2) & 0x3333333333333333ULL);
+    b = (b + (b >> 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    return static_cast<int>(
+        (b * 0x0101010101010101ULL) >> 56
+    );
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(b);
+#else
+    int count = 0;
+    while (b) {
+        b &= b - 1;
+        ++count;
+    }
+    return count;
+#endif
+}
+
+inline int lsb(U64 b) {
+    if (b == 0) return -1;
+
+#if defined(_MSC_VER)
+    unsigned long index;
+    _BitScanForward64(&index, b);
+    return static_cast<int>(index);
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(b);
+#else
+    int index = 0;
+    while ((b & 1ULL) == 0) {
+        b >>= 1;
+        ++index;
+    }
+    return index;
+#endif
+}
+
+inline int msb(U64 b) {
+    if (b == 0) return -1;
+
+#if defined(_MSC_VER)
+    unsigned long index;
+    _BitScanReverse64(&index, b);
+    return static_cast<int>(index);
+#elif defined(__GNUC__) || defined(__clang__)
+    return 63 - __builtin_clzll(b);
+#else
+    int index = -1;
+    while (b) {
+        b >>= 1;
+        ++index;
+    }
+    return index;
+#endif
+}
+
+inline U64 popLSB(U64& b) {
+    U64 t = b & -b;
+    b &= b - 1;
+    return t;
+}
+
+inline U64 bit(int sq) {
+    return 1ULL << sq;
+}
 
 // Named bitboard constants
+
 constexpr U64 FILE_A = 0x0101010101010101ULL;
 constexpr U64 FILE_B = FILE_A << 1;
 constexpr U64 FILE_G = FILE_A << 6;
 constexpr U64 FILE_H = FILE_A << 7;
+
 constexpr U64 RANK_1 = 0xFFULL;
 constexpr U64 RANK_2 = RANK_1 << 8;
 constexpr U64 RANK_3 = RANK_1 << 16;
@@ -21,57 +93,86 @@ constexpr U64 RANK_5 = RANK_1 << 32;
 constexpr U64 RANK_6 = RANK_1 << 40;
 constexpr U64 RANK_7 = RANK_1 << 48;
 constexpr U64 RANK_8 = RANK_1 << 56;
-constexpr U64 ALL    = ~0ULL;
 
-// ── Pre-computed attack tables ────────────────────────────────────────────────
+constexpr U64 ALL = ~0ULL;
+
+// ── Pre-computed attack tables ───────────────────────────────
+
 extern U64 KNIGHT_ATTACKS[64];
 extern U64 KING_ATTACKS[64];
-extern U64 PAWN_ATTACKS[2][64];   // [color][sq]
+extern U64 PAWN_ATTACKS[2][64];
 
-void initAttacks();                 // call once at startup
+void initAttacks();
 
-// ── Sliding piece attacks (on-the-fly, occupancy aware) ───────────────────────
+// ── Sliding piece attacks ────────────────────────────────────
+
 inline U64 rookAttacks(int sq, U64 occ) {
     U64 attacks = 0;
     int r = rankOf(sq), f = fileOf(sq);
+
     // North
-    for (int rr = r+1; rr <= 7; rr++) {
+    for (int rr = r + 1; rr <= 7; rr++) {
         U64 b = bit(makeSquare(f, rr));
         attacks |= b;
         if (occ & b) break;
     }
+
     // South
-    for (int rr = r-1; rr >= 0; rr--) {
+    for (int rr = r - 1; rr >= 0; rr--) {
         U64 b = bit(makeSquare(f, rr));
         attacks |= b;
         if (occ & b) break;
     }
+
     // East
-    for (int ff = f+1; ff <= 7; ff++) {
+    for (int ff = f + 1; ff <= 7; ff++) {
         U64 b = bit(makeSquare(ff, r));
         attacks |= b;
         if (occ & b) break;
     }
+
     // West
-    for (int ff = f-1; ff >= 0; ff--) {
+    for (int ff = f - 1; ff >= 0; ff--) {
         U64 b = bit(makeSquare(ff, r));
         attacks |= b;
         if (occ & b) break;
     }
+
     return attacks;
 }
 
 inline U64 bishopAttacks(int sq, U64 occ) {
     U64 attacks = 0;
     int r = rankOf(sq), f = fileOf(sq);
-    for (int rr=r+1, ff=f+1; rr<=7 && ff<=7; rr++, ff++) {
-        U64 b = bit(makeSquare(ff, rr)); attacks |= b; if (occ & b) break; }
-    for (int rr=r+1, ff=f-1; rr<=7 && ff>=0; rr++, ff--) {
-        U64 b = bit(makeSquare(ff, rr)); attacks |= b; if (occ & b) break; }
-    for (int rr=r-1, ff=f+1; rr>=0 && ff<=7; rr--, ff++) {
-        U64 b = bit(makeSquare(ff, rr)); attacks |= b; if (occ & b) break; }
-    for (int rr=r-1, ff=f-1; rr>=0 && ff>=0; rr--, ff--) {
-        U64 b = bit(makeSquare(ff, rr)); attacks |= b; if (occ & b) break; }
+
+    for (int rr = r + 1, ff = f + 1;
+         rr <= 7 && ff <= 7; rr++, ff++) {
+        U64 b = bit(makeSquare(ff, rr));
+        attacks |= b;
+        if (occ & b) break;
+    }
+
+    for (int rr = r + 1, ff = f - 1;
+         rr <= 7 && ff >= 0; rr++, ff--) {
+        U64 b = bit(makeSquare(ff, rr));
+        attacks |= b;
+        if (occ & b) break;
+    }
+
+    for (int rr = r - 1, ff = f + 1;
+         rr >= 0 && ff <= 7; rr--, ff++) {
+        U64 b = bit(makeSquare(ff, rr));
+        attacks |= b;
+        if (occ & b) break;
+    }
+
+    for (int rr = r - 1, ff = f - 1;
+         rr >= 0 && ff >= 0; rr--, ff--) {
+        U64 b = bit(makeSquare(ff, rr));
+        attacks |= b;
+        if (occ & b) break;
+    }
+
     return attacks;
 }
 
