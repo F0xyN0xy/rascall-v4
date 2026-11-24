@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Analyse recorded Rascall PGNs with a local Stockfish-compatible UCI engine."""
+"""Analyse recorded Rascall PGNs with a local Stockfish-compatible UCI engine.
 
+Loss is measured by comparing Stockfish's unrestricted root score with a
+search restricted to the move actually played. Mate scores remain mate scores;
+they are never converted to arbitrary centipawn values.
+"""
 from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,11 +18,43 @@ import chess.engine
 import chess.pgn
 
 
-def score_cp(info: dict[str, Any], pov: chess.Color) -> int | None:
-    score = info.get("score")
-    if score is None:
+def score_record(info: dict[str, Any], pov: chess.Color) -> dict[str, int | None] | None:
+    """Return mover-relative centipawns or mate distance, never both."""
+    raw = info.get("score")
+    if raw is None:
         return None
-    return score.pov(pov).score(mate_score=100000)
+    score = raw.pov(pov)
+    mate = score.mate()
+    return {"cp": None, "mate": mate} if mate is not None else {"cp": score.score(), "mate": None}
+
+
+def compare_scores(
+    best: dict[str, int | None] | None,
+    played: dict[str, int | None] | None,
+) -> tuple[int | None, bool]:
+    """Return centipawn regret and a separate forced-mate regression flag."""
+    if best is None or played is None:
+        return None, False
+    best_cp, played_cp = best.get("cp"), played.get("cp")
+    if best_cp is not None and played_cp is not None:
+        return max(0, int(best_cp) - int(played_cp)), False
+
+    best_mate, played_mate = best.get("mate"), played.get("mate")
+    regression = (
+        best_mate is not None and best_mate > 0
+        and (played_mate is None or played_mate <= 0)
+    ) or (
+        best_mate is None and played_mate is not None and played_mate < 0
+    )
+    return None, regression
+
+
+def display_score(score: dict[str, int | None] | None) -> str:
+    if score is None:
+        return "unavailable"
+    if score.get("mate") is not None:
+        return f"mate({score['mate']})"
+    return f"{score.get('cp')} cp"
 
 
 def analyse_game(
@@ -30,54 +65,55 @@ def analyse_game(
 ) -> tuple[chess.pgn.Game, list[dict[str, Any]]]:
     annotated = chess.pgn.Game()
     annotated.headers.update(game.headers)
-    source_board = game.board()
-    out_board = annotated.board()
+    board = game.board()
     mistakes: list[dict[str, Any]] = []
 
     for ply, move in enumerate(game.mainline_moves(), start=1):
-        if move not in source_board.legal_moves:
+        if move not in board.legal_moves:
             annotated.headers["AnalysisError"] = f"Illegal move at ply {ply}"
             break
 
-        mover = source_board.turn
-        before = source_board.fen()
-        before_info = engine.analyse(source_board, limit)
-        best_pv = before_info.get("pv", [])
-        best_move = best_pv[0] if best_pv else None
-        best_text = source_board.san(best_move) if best_move and best_move in source_board.legal_moves else (
+        mover = board.turn
+        fen_before = board.fen()
+        best_info = engine.analyse(board, limit)
+        pv = best_info.get("pv", [])
+        best_move = pv[0] if pv else None
+        best_san = board.san(best_move) if best_move in board.legal_moves else (
             best_move.uci() if best_move else "unavailable"
         )
-        before_score = score_cp(before_info, mover)
+        best_score = score_record(best_info, mover)
 
-        source_board.push(move)
-        after_info = engine.analyse(source_board, limit)
-        after_score = score_cp(after_info, mover)
-        loss = (
-            max(0, before_score - after_score)
-            if before_score is not None and after_score is not None
-            else None
+        # Both evaluations are rooted in the same pre-move position and use
+        # the same depth. If the played move is already best, reuse its score.
+        played_info = best_info if move == best_move else engine.analyse(
+            board, limit, root_moves=[move]
         )
+        played_score = score_record(played_info, mover)
+        loss_cp, mate_regression = compare_scores(best_score, played_score)
 
         node = annotated.end().add_variation(move)
         node.comment = (
-            f"Stockfish best before move: {best_text}; "
-            f"eval after move (mover POV): {after_score}; "
-            f"estimated loss: {loss if loss is not None else 'unknown'} cp"
+            f"Stockfish best: {best_san}; best root eval (mover POV): "
+            f"{display_score(best_score)}; played-move root eval: "
+            f"{display_score(played_score)}; estimated loss: "
+            f"{loss_cp if loss_cp is not None else 'not comparable'} cp"
+            + ("; forced-mate outcome worsened" if mate_regression else "")
         )
 
-        if loss is not None and loss >= threshold:
+        if (loss_cp is not None and loss_cp >= threshold) or mate_regression:
             mistakes.append({
                 "ply": ply,
                 "side": "white" if mover else "black",
-                "fen_before": before,
+                "fen_before": fen_before,
                 "played": move.uci(),
                 "best_move": best_move.uci() if best_move else None,
-                "best_move_san": best_text,
-                "eval_before_cp": before_score,
-                "eval_after_cp": after_score,
-                "loss_cp": loss,
+                "best_move_san": best_san,
+                "best_score": best_score,
+                "played_score": played_score,
+                "loss_cp": loss_cp,
+                "mate_regression": mate_regression,
             })
-        out_board.push(move)
+        board.push(move)
 
     annotated.headers["Annotator"] = "Stockfish post-game analysis"
     return annotated, mistakes
@@ -87,7 +123,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pgn", type=Path, help="PGN file or directory containing PGNs")
     parser.add_argument("--stockfish", type=Path, required=True, help="Path to Stockfish executable")
-    parser.add_argument("--depth", type=int, default=12, help="Analysis depth per position")
+    parser.add_argument("--depth", type=int, default=12, help="Analysis depth per candidate move")
     parser.add_argument("--mistake-cp", type=int, default=100, help="Report moves losing at least this many centipawns")
     parser.add_argument("--hash", type=int, default=512, help="Stockfish hash size in MB")
     parser.add_argument("--output-dir", type=Path, default=Path("games/analysed"))
@@ -110,15 +146,13 @@ def main() -> int:
         "engine": str(args.stockfish),
         "depth": args.depth,
         "mistake_threshold_cp": args.mistake_cp,
+        "scoring": "same-root best-vs-played comparison; mate scores separate from cp",
         "games": [],
     }
 
     with chess.engine.SimpleEngine.popen_uci(str(args.stockfish), timeout=30) as engine:
-        supported = {}
         if "Hash" in engine.options:
-            supported["Hash"] = args.hash
-        if supported:
-            engine.configure(supported)
+            engine.configure({"Hash": args.hash})
 
         for source in files:
             with source.open("r", encoding="utf-8", errors="replace") as handle:
@@ -128,26 +162,26 @@ def main() -> int:
                     if game.errors:
                         report["games"].append({
                             "source": str(source), "game": game_index,
-                            "error": "PGN parsing errors", "details": [str(e) for e in game.errors],
+                            "error": "PGN parsing errors",
+                            "details": [str(error) for error in game.errors],
                         })
                         continue
+
                     annotated, mistakes = analyse_game(
                         game, engine, chess.engine.Limit(depth=args.depth), args.mistake_cp
                     )
                     output = args.output_dir / f"{source.stem}-{game_index:03d}-analysed.pgn"
                     with output.open("w", encoding="utf-8") as out:
-                        exporter = chess.pgn.FileExporter(out)
-                        annotated.accept(exporter)
+                        annotated.accept(chess.pgn.FileExporter(out))
                         out.write("\n")
+
                     report["games"].append({
-                        "source": str(source),
-                        "game": game_index,
+                        "source": str(source), "game": game_index,
                         "white": game.headers.get("White", "?"),
                         "black": game.headers.get("Black", "?"),
                         "result": game.headers.get("Result", "*"),
                         "analysed_pgn": str(output),
-                        "mistake_count": len(mistakes),
-                        "mistakes": mistakes,
+                        "mistake_count": len(mistakes), "mistakes": mistakes,
                     })
 
     report_path = args.output_dir / f"analysis-report-{stamp}.json"
