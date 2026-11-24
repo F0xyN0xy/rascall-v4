@@ -81,7 +81,7 @@ bool OpeningBook::loadPolyglot(const std::string& path) {
         }
     }
 
-    std::cout << "[Book] Loaded " << count << " entries from " << path << "\n";
+    std::cerr << "[Book] Loaded " << count << " entries from " << path << "\n";
     return count > 0;
 }
 
@@ -169,5 +169,5 @@ void OpeningBook::initBuiltinRepertoire() {
     addLine({"d2d4", "d7d5", "c2c4", "e7e6", "b1c3", "g8f6", "c1g5", "f8e7"}, 8);  // QGD
     addLine({"d2d4", "g8f6", "g1f3", "e7e6", "c1f4", "d7d5", "e2e3", "f8d6"}, 8);  // London vs KID setup
 
-    std::cout << "[Book] Built-in repertoire loaded: " << entries_.size() << " positions\n";
+    std::cerr << "[Book] Built-in repertoire loaded: " << entries_.size() << " positions\n";
 }

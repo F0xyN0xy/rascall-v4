@@ -28,8 +28,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Default: run UCI loop (for GUI / Cutechess / Arena) ───────────────────
-    std::cout << "ChessRL Engine ready. Type 'uci' to begin.\n";
-    std::cout.flush();
+    std::cerr << "Rascall v4 ready. Waiting for UCI commands.\n";
     uciLoop();
     return 0;
 }

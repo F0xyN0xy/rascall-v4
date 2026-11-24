@@ -18,6 +18,7 @@ struct SearchLimits {
 
 struct SearchResult {
     Move bestMove  = NULL_MOVE;
+    Move ponderMove = NULL_MOVE; // Second move in the completed principal variation
     int  score     = 0;
     int  depth     = 0;
     uint64_t nodes = 0;
@@ -35,9 +36,10 @@ public:
 
 private:
     uint64_t nodes_ = 0;
-    std::chrono::steady_clock::time_point startTime_;
-    int       timeLimit_ = 0;    // Hard limit
-    int       softLimit_ = 0;    // Soft limit (can stop early)
+    std::atomic<int64_t> startTimeNs_{0};
+    std::atomic<int> timeLimit_{0};    // Hard limit; updated safely on ponderhit
+    std::atomic<int> softLimit_{0};    // Soft limit; updated safely on ponderhit
+    int elapsedMs() const;
     mutable bool timeUpCached_ = false; // throttled timeUp() result, refreshed every 2048 nodes
     int       bestScoreRoot_ = 0;
     int       prevBestScore_ = -INF;
@@ -47,7 +49,7 @@ private:
     int  history_[64][64]     = {};
 
     int  alphaBeta(Board& b, int alpha, int beta, int depth, int ply, bool nullOk);
-    int  quiesce(Board& b, int alpha, int beta);
+    int  quiesce(Board& b, int alpha, int beta, int ply);
     void orderMoves(MoveList& ml, Move ttMove, int ply);
     int  mvvLva(const Board& b, Move m) const;
     bool timeUp() const;

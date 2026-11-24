@@ -1,6 +1,9 @@
 #include "uci.h"
 #include "movegen.h"
 #include "gensfen.h"
+#include "pgn_recorder.h"
+#include <algorithm>
+#include <string>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -10,10 +13,12 @@
 // ── Global state ──────────────────────────────────────────────────────────────
 static Board gBoard;
 static std::thread searchThread;
-static Move ponderMove = NULL_MOVE;
 static bool isPondering = false;
+static int ponderSoftTime = 0;
+static int ponderHardTime = 0;
 static SearchLimits currentLimits;
-static bool useBook = true;  // ← ADDED: track book setting
+static bool useBook = true;
+static bool usePonder = true;
 
 // ── Parse position ────────────────────────────────────────────────────────────
 static void parsePosition(const std::string& line) {
@@ -22,21 +27,29 @@ static void parsePosition(const std::string& line) {
     ss >> token; // "position"
 
     ss >> token;
+    std::string recordingStartFen;
     if (token == "startpos") {
         gBoard.setStartPos();
+        recordingStartFen = gBoard.getFEN();
         ss >> token; // might be "moves"
     } else if (token == "fen") {
         std::string fen;
         while (ss >> token && token != "moves")
             fen += token + " ";
         gBoard.setFEN(fen);
+        recordingStartFen = gBoard.getFEN();
     }
 
+    GameRecorder.reset(recordingStartFen.empty() ? gBoard.getFEN() : recordingStartFen);
     while (ss >> token) {
         if (token == "moves") continue;
         Move m = strToMove(gBoard, token);
-        if (m != NULL_MOVE) gBoard.makeMove(m);
+        if (m != NULL_MOVE) {
+            GameRecorder.append(gBoard, m);
+            gBoard.makeMove(m);
+        }
     }
+    GameRecorder.saveActive();
 }
 
 // ── FAST game phase estimate (no movegen!) ────────────────────────────────────
@@ -56,83 +69,146 @@ static int estimateComplexityFast(const Board& b) {
     return complexity;
 }
 
-// ── Calculate time allocation ─────────────────────────────────────────────────
-static void calculateTimeLimits(int myTime, int myInc, int movestogo, 
+// ── Calculate adaptive time allocation ──────────────────────────────────────
+static void calculateTimeLimits(int myTime, int myInc, int movestogo,
                                 int& softMs, int& hardMs, const Board& b) {
-    if (myTime <= 0) {
-        softMs = hardMs = 0;
-        return;
-    }
+    softMs = hardMs = 0;
+    if (myTime <= 0) return;
 
-    int phase = estimateGamePhaseFast(b);
-    int complexity = estimateComplexityFast(b);
+    // Reserve a small amount for GUI/UCI overhead and returning bestmove.
+    const int overhead = std::min(100, std::max(20, myTime / 100));
+    const int usable = std::max(1, myTime - overhead);
 
-    // MUCH more conservative factors
-    float baseFactor;
-    if (phase > 24)       baseFactor = 0.008f;   // Opening: 0.8%
-    else if (phase > 12)  baseFactor = 0.015f;   // Middlegame: 1.5%
-    else if (phase > 6)   baseFactor = 0.025f;   // Endgame: 2.5%
-    else                  baseFactor = 0.040f;   // Late endgame: 4%
+    const int phase = estimateGamePhaseFast(b);
+    const int complexity = estimateComplexityFast(b);
 
-    if (movestogo > 0 && movestogo < 10) {
-        baseFactor *= 0.7f;
-    }
+    // Use the GUI's explicit moves-to-go when available. Otherwise estimate
+    // remaining moves conservatively from the size of the clock.
+    int expectedMoves = movestogo > 0
+        ? std::clamp(movestogo, 1, 80)
+        : (myTime < 30'000 ? 42 : myTime < 120'000 ? 38 :
+           myTime < 600'000 ? 42 : 48);
 
-    float complexityMult = 1.0f;
-    if (complexity > 50)      complexityMult = 1.2f;
-    else if (complexity > 30) complexityMult = 1.1f;
-    else if (complexity < 15) complexityMult = 0.8f;
+    // Preserve more time in the opening; allow more precise endgame decisions.
+    if (phase > 24) expectedMoves += 5;
+    else if (phase <= 6) expectedMoves = std::max(18, expectedMoves - 7);
+    else if (phase <= 12) expectedMoves = std::max(22, expectedMoves - 3);
 
-    float incBonus = myInc * 0.4f;
+    double complexityFactor = 1.0;
+    if (b.inCheck()) complexityFactor += 0.20;
+    if (complexity >= 55) complexityFactor += 0.15;
+    else if (complexity >= 40) complexityFactor += 0.08;
+    else if (complexity < 18) complexityFactor -= 0.12;
+    complexityFactor = std::clamp(complexityFactor, 0.80, 1.35);
 
-    softMs = int(myTime * baseFactor * complexityMult + incBonus);
-    hardMs = int(myTime * baseFactor * complexityMult * 1.8f + incBonus);
+    const double incrementContribution =
+        std::min(double(myInc) * 0.80, double(usable) * 0.04);
+    const double optimum =
+        (double(usable) / expectedMoves + incrementContribution) * complexityFactor;
 
-    // ABSOLUTE CAPS
-    int maxTime = myTime / 15;
-    int maxSoft = myTime / 25;
+    // Short clocks get stricter per-move caps to reduce flagging risk.
+    const double softFractionCap = myTime <= 120'000 ? 0.06 : 0.08;
+    const double hardFractionCap = myTime <= 120'000 ? 0.12 : 0.18;
+    const int softCap = std::max(1, int(usable * softFractionCap));
+    const int hardCap = std::max(softCap, int(usable * hardFractionCap));
 
-    if (phase > 24) {
-        maxTime = std::min(maxTime, 2000);   // Max 2s in opening
-        maxSoft = std::min(maxSoft, 1200);   // Soft: 1.2s
-    }
+    softMs = std::clamp(int(optimum), 1, softCap);
+    const double hardMultiplier = myTime <= 30'000 ? 2.4 : 3.0;
+    const double incrementFloor = std::min(250.0, double(myInc));
+    hardMs = std::clamp(
+        int(std::max(optimum * hardMultiplier, optimum + incrementFloor)),
+        softMs, hardCap);
 
-    hardMs = std::min(hardMs, maxTime);
-    softMs = std::min(softMs, maxSoft);
-
-    hardMs = std::max(hardMs, softMs + 100);
-
-    if (softMs < 50) softMs = 50;
-    if (hardMs < 100) hardMs = 100;
-
-    int overhead = 100;
-    hardMs = std::max(50, hardMs - overhead);
-    softMs = std::max(50, softMs - overhead);
+    softMs = std::min(softMs, usable);
+    hardMs = std::min(std::max(hardMs, softMs), usable);
 }
 
-// ── Start search thread ───────────────────────────────────────────────────────
-static void startSearch(const SearchLimits& lim) {
+// ── Search lifecycle and legal fallback ───────────────────────────────────────
+static void stopSearch() {
     if (searchThread.joinable()) {
         Engine.stop = true;
         searchThread.join();
     }
-    Engine.stop = false;
+}
 
-    auto searchStart = std::chrono::steady_clock::now();
+static bool isLegalMove(Board& board, Move move) {
+    MoveList moves;
+    generateMoves(board, moves);
+    for (int i = 0; i < moves.count; ++i) {
+        if (moves.moves[i] != move) continue;
+        board.makeMove(move);
+        bool legal = !board.isAttacked(board.kingSquare(~board.sideToMove), board.sideToMove);
+        board.unmakeMove();
+        return legal;
+    }
+    return false;
+}
+
+static Move firstLegalMove(Board b) {
+    MoveList moves;
+    generateMoves(b, moves);
+    for (int i = 0; i < moves.count; ++i) {
+        if (isLegalMove(b, moves.moves[i])) return moves.moves[i];
+    }
+    return NULL_MOVE;
+}
+
+// Obtain a legal predicted reply from the transposition table's child position.
+// UCI's "bestmove X ponder Y" means Y is the opponent's predicted response.
+static Move findPonderReply(Board board, Move bestMove) {
+    if (bestMove == NULL_MOVE || !isLegalMove(board, bestMove)) return NULL_MOVE;
+
+    board.makeMove(bestMove);
+    TTEntry* entry = TT.probe(board.hash);
+    if (!entry || entry->move == NULL_MOVE) {
+        board.unmakeMove();
+        return NULL_MOVE;
+    }
+
+    Move reply = entry->move;
+    bool legal = isLegalMove(board, reply);
+    board.unmakeMove();
+    return legal ? reply : NULL_MOVE;
+}
+
+// ── Start search thread ───────────────────────────────────────────────────────
+static void startSearch(const SearchLimits& lim) {
+    stopSearch();
+    Engine.stop = false;
+    if (lim.ponder) Engine.setTimeLimits(0, 0);
     currentLimits = lim;
 
-    searchThread = std::thread([lim, searchStart]() {
-        Board b = gBoard;
-        SearchResult result = Engine.search(b, lim);
+    // Snapshot the position before launching the worker. The UCI thread may
+    // receive another command while the search is running.
+    Board searchBoard = gBoard;
+    searchThread = std::thread([lim, searchBoard]() mutable {
+        SearchResult result = Engine.search(searchBoard, lim);
+        Move bestMove = result.bestMove;
 
-        auto searchEnd = std::chrono::steady_clock::now();
-        int elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(searchEnd - searchStart).count();
+        // A stop during the first iteration can leave the search without a PV.
+        // UCI still requires a bestmove response, so return a legal fallback.
+        if (bestMove == NULL_MOVE) bestMove = firstLegalMove(searchBoard);
 
+        if (bestMove == NULL_MOVE) {
+            std::cout << "bestmove 0000" << std::endl;
+        } else {
+            Move reply = result.ponderMove;
+            if (reply == NULL_MOVE) reply = findPonderReply(searchBoard, bestMove);
+            else {
+                Board afterBest = searchBoard;
+                afterBest.makeMove(bestMove);
+                if (!isLegalMove(afterBest, reply)) reply = NULL_MOVE;
+            }
+            std::cout << "bestmove " << moveToStr(bestMove);
+            if (reply != NULL_MOVE) std::cout << " ponder " << moveToStr(reply);
+            std::cout << std::endl;
+        }
     });
 }
 
 // ── Parse go command ──────────────────────────────────────────────────────────
 static void parseGo(const std::string& line) {
+    stopSearch();
     std::istringstream ss(line);
     std::string token;
     ss >> token; // "go"
@@ -153,6 +229,8 @@ static void parseGo(const std::string& line) {
         if (token == "movestogo") { ss >> movestogo; }
         if (token == "ponder")    { doPonder = true; }
     }
+
+    doPonder = doPonder && usePonder;
 
     // === INSTANT BOOK MOVE — NO SEARCH THREAD AT ALL ===
     if (useBook && !doPonder && !lim.infinite && lim.movetime == 0 && !depthSet) {
@@ -177,6 +255,14 @@ static void parseGo(const std::string& line) {
             calculateTimeLimits(myTime, myInc, movestogo, softMs, hardMs, gBoard);
             lim.softTime = softMs;
             lim.movetime = hardMs;
+
+            // Diagnostics go to stderr so they never interfere with UCI stdout.
+            std::cerr << "[TimeManager] clock=" << myTime
+                      << " increment=" << myInc
+                      << " movesToGo=" << movestogo
+                      << " soft=" << softMs
+                      << " hard=" << hardMs
+                      << '\n';
         }
     }
 
@@ -184,16 +270,18 @@ static void parseGo(const std::string& line) {
         isPondering = true;
         lim.ponder = true;
         lim.infinite = true;
+        lim.depth = MAX_PLY;
+
+        // Keep the clock budget calculated from the go command. It starts
+        // counting only when ponderhit arrives, not while the engine thinks.
+        ponderSoftTime = lim.softTime;
+        ponderHardTime = lim.movetime;
         lim.movetime = 0;
         lim.softTime = 0;
-
-        TTEntry* tte = TT.probe(gBoard.hash);
-        if (tte && tte->move != NULL_MOVE) {
-            ponderMove = tte->move;
-        }
     } else {
         isPondering = false;
-        ponderMove = NULL_MOVE;
+        ponderSoftTime = 0;
+        ponderHardTime = 0;
     }
 
     startSearch(lim);
@@ -204,7 +292,7 @@ void uciLoop() {
     EW.load("weights.bin");
 
     if (!Book.loadPolyglot("book.bin")) {
-        std::cout << "info string No external book, using built-in repertoire";
+        std::cerr << "info string No external book, using built-in repertoire\n";
         Book.initBuiltinRepertoire();
     }
 
@@ -217,27 +305,29 @@ void uciLoop() {
         ss >> cmd;
 
         if (cmd == "uci") {
-            std::cout << "id name Rascall v4";
-            std::cout << "id author FoxyNet475";
-            std::cout << "option name Hash type spin default 64 min 1 max 1024";
-            std::cout << "option name Depth type spin default 0 min 0 max 64";
-            std::cout << "option name BookFile type string default book.bin";
-            std::cout << "option name UseBook type check default true";
-            std::cout << "option name Ponder type check default true";
-            std::cout << "uciok";
-            std::cout.flush();
+            std::cout << "id name Rascall v4" << std::endl;
+            std::cout << "id author FoxyNet475" << std::endl;
+            std::cout << "option name Hash type spin default 64 min 1 max 1024" << std::endl;
+            std::cout << "option name Depth type spin default 0 min 0 max 64" << std::endl;
+            std::cout << "option name BookFile type string default book.bin" << std::endl;
+            std::cout << "option name UseBook type check default true" << std::endl;
+            std::cout << "option name Ponder type check default true" << std::endl;
+            std::cout << "uciok" << std::endl;
         }
         else if (cmd == "isready") {
-            std::cout << "readyok";
-            std::cout.flush();
+            std::cout << "readyok" << std::endl;
         }
         else if (cmd == "ucinewgame") {
+            stopSearch();
+            GameRecorder.finish();
             TT.clear();
             gBoard.setStartPos();
             isPondering = false;
-            ponderMove = NULL_MOVE;
+            ponderSoftTime = 0;
+            ponderHardTime = 0;
         }
         else if (cmd == "setoption") {
+            stopSearch();
             std::string name, val;
             ss >> name; // "name"
             ss >> name; // actual name
@@ -252,8 +342,11 @@ void uciLoop() {
                     Book.initBuiltinRepertoire();
                 }
             }
-            else if (name == "UseBook") {   // ← ADDED
+            else if (name == "UseBook") {
                 useBook = (val == "true");
+            }
+            else if (name == "Ponder") {
+                usePonder = (val == "true");
             }
             else if (name == "Depth") {
                 int d = std::stoi(val);
@@ -261,28 +354,31 @@ void uciLoop() {
             }
         }
         else if (cmd == "position") {
+            stopSearch();
             parsePosition(line);
         }
         else if (cmd == "go") {
             parseGo(line);
         }
         else if (cmd == "stop") {
-            Engine.stop = true;
             isPondering = false;
-            if (searchThread.joinable()) searchThread.join();
+            stopSearch();
         }
         else if (cmd == "ponderhit") {
             if (isPondering) {
                 isPondering = false;
-                int myTime = (gBoard.sideToMove == WHITE) ? 30000 : 30000;
-                int softMs, hardMs;
-                calculateTimeLimits(myTime, 0, 0, softMs, hardMs, gBoard);
-                Engine.setTimeLimits(softMs, hardMs);
+                Engine.setTimeLimits(ponderSoftTime, ponderHardTime);
             }
         }
+        else if (cmd == "game_result") {
+            std::string result;
+            ss >> result;
+            GameRecorder.setResult(result);
+        }
         else if (cmd == "quit") {
-            Engine.stop = true;
-            if (searchThread.joinable()) searchThread.join();
+            isPondering = false;
+            stopSearch();
+            GameRecorder.finish();
             break;
         }
         else if (cmd == "perft") {
